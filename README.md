@@ -7,6 +7,57 @@ RepoAudit is a repo-level bug detector for general bugs. Currently, it supports 
 - 🐞 **Multiple Bug Type Detection**
 - ⚙️ **Customization Support**
 
+## Pi Agent 插件化扩展
+
+本仓库在保留 RepoAudit 原有代码审计能力的基础上，新增了面向 Pi Agent 的外部插件。插件将 RepoAudit 的 Python 分析运行时封装为 `repoaudit_scan` Tool，使 Agent 能够通过自然语言发起仓库级数据流缺陷审计，无需修改宿主 Agent 源码。
+
+### 组件关系
+
+```text
+用户自然语言请求
+       ↓
+Pi Agent
+       ↓ 调用 repoaudit_scan
+pi-extension
+       ↓ 调用 Python runtime
+RepoAudit
+       ↓
+审计结果（有发现 / 无发现 / 执行失败）
+```
+
+### 插件能力
+
+- 以外部 Extension 形式接入 Pi Agent
+- 校验目标仓库路径、编程语言和漏洞类型
+- 支持超时、取消以及子进程树终止
+- 区分“扫描成功且有发现”“扫描成功但无发现”和“执行失败”
+- 对返回给 Agent 的结果进行精简和敏感信息过滤
+
+当前支持范围：
+
+| Language | Bug Type |
+| --- | --- |
+| `Cpp` | `NPD`、`UAF`、`MLK` |
+| `Java` | `NPD` |
+| `Python` | `NPD` |
+| `Go` | `NPD` |
+
+### 快速入口
+
+插件位于 [`pi-extension/`](./pi-extension/)，其 Tool 参数如下：
+
+```ts
+{
+  repoPath: string;
+  language: "Cpp" | "Java" | "Python" | "Go";
+  bugType: "MLK" | "NPD" | "UAF";
+}
+```
+
+完整的环境要求、安装步骤、配置项、启动方式、结果语义及测试命令，请参阅 [Pi Extension 使用文档](./pi-extension/README.md)。
+
+> 说明：本节描述的是本仓库新增的插件化扩展，并非 RepoAudit 上游项目的原生功能。下文保留了上游 RepoAudit 的项目介绍、使用方式、论文与引用信息。
+
 ## News 📰
 
 **[June 2025]** The preprint of "An LLM Agent for Functional Bug Detection in Network Protocols" has been released, providing the technical details of `rfcscan`!

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+!src/adapter/result-parser.ts
+!src/extension/result-mapper.ts
+!tests/result-mapper.test.ts
+!tests/result-parser.test.ts

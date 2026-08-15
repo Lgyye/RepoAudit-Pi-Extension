@@ -1,0 +1,39 @@
+{
+  "name": "@repoaudit/typescript-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi Extension and standalone TypeScript adapter for the existing RepoAudit Python runtime",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "smoke": "npm run build && node dist/tests/standalone-smoke.js",
+    "verify:extension-load": "node tests/verify-extension-load.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@types/node": "^24.0.0",
+    "typebox": "1.3.7",
+    "typescript": "^5.9.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "typebox": "1.3.7"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

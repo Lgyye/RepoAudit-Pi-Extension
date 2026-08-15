@@ -52,7 +52,7 @@ class DFBScanAgent(Agent):
         self.is_reachable = is_reachable
 
         self.project_path = project_path
-        self.project_name = project_path.split("/")[-1]
+        self.project_name = Path(project_path).resolve().name
         self.language = language if language not in {"C", "Cpp"} else "Cpp"
         self.ts_analyzer = ts_analyzer
 
