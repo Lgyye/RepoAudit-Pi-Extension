@@ -1,0 +1,19 @@
+{
+    "7": {
+        "bug_type": "NPD",
+        "buggy_value": "((None, C:/中文 repo/case.py, 12, -1), ValueLabel.SRC)",
+        "relevant_functions": [
+            [
+                "C:/中文 repo/case.py"
+            ],
+            [
+                "get_value"
+            ],
+            [
+                "def get_value(): return None"
+            ]
+        ],
+        "explanation": "Potential null pointer dereference.",
+        "is_human_confirmed_true": "False"
+    }
+}
