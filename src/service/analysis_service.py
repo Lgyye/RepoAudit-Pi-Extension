@@ -24,6 +24,7 @@ from protocol import (
     RepositoryProfile,
     SourceLocation,
     StructuredError,
+    ValidationResult,
     make_path_id,
     validate_candidate_id,
     validate_run_id,
@@ -59,6 +60,7 @@ class _RunAnalysisContext:
     candidates: Dict[str, AuditCandidate]
     event_writer: EventWriter
     paths: Dict[str, Dict[str, DataFlowPath]] = field(default_factory=dict)
+    validations: Dict[str, Dict[str, ValidationResult]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -226,6 +228,37 @@ def _load_candidate_context(
         if candidate is None:
             raise KeyError("candidate was not found in the requested run")
         return context, candidate
+
+
+def _load_path_context(
+    run_id: str,
+    candidate_id: str,
+    path_id: str,
+) -> Tuple[_RunAnalysisContext, AuditCandidate, DataFlowPath]:
+    """Load exactly one transient path for TASK-007 validation."""
+
+    with _CONTEXTS_LOCK:
+        context = _CONTEXTS.get(run_id)
+        if context is None:
+            raise LookupError("run analysis context was not found")
+        candidate = context.candidates.get(candidate_id)
+        if candidate is None:
+            raise KeyError("candidate was not found in the requested run")
+        path = context.paths.get(candidate_id, {}).get(path_id)
+        if path is None:
+            raise FileNotFoundError("path was not found for the requested candidate")
+        return context, candidate, path
+
+
+def _store_validation_result(
+    context: _RunAnalysisContext,
+    result: ValidationResult,
+) -> None:
+    """Retain one public validation result until TASK-008 adds RunStore."""
+
+    with _CONTEXTS_LOCK:
+        candidate_results = context.validations.setdefault(result.candidate_id, {})
+        candidate_results[result.path_id] = result
 
 
 def _analyze_loaded_candidate(
