@@ -11,7 +11,7 @@ from tstool.analyzer.Go_TS_analyzer import *
 from tstool.analyzer.Java_TS_analyzer import *
 from tstool.analyzer.Python_TS_analyzer import *
 
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 default_dfbscan_checkers = {
     "Cpp": ["MLK", "NPD", "UAF"],
@@ -31,6 +31,7 @@ class RepoAudit:
         """
         # argument format check
         self.args = args
+        self.dfb_engine = getattr(args, "dfb_engine", "legacy")
         is_input_valid, error_messages = self.validate_inputs()
 
         if not is_input_valid:
@@ -50,6 +51,10 @@ class RepoAudit:
         self.bug_type = args.bug_type
         self.is_reachable = args.is_reachable
 
+        self.ts_analyzer: Optional[TSAnalyzer] = None
+        if self.args.scan_type == "dfbscan" and self.dfb_engine == "staged":
+            return
+
         suffixs = []
         if self.language == "Cpp":
             suffixs = ["cpp", "cc", "hpp", "c", "h"]
@@ -65,7 +70,6 @@ class RepoAudit:
         # Load all files with the specified suffix in the project path
         self.traverse_files(self.project_path, suffixs)
 
-        self.ts_analyzer: TSAnalyzer
         if self.language == "Cpp":
             self.ts_analyzer = Cpp_TSAnalyzer(
                 self.code_in_files, self.language, self.max_symbolic_workers
@@ -89,6 +93,7 @@ class RepoAudit:
         Start the batch scan process.
         """
         if self.args.scan_type == "metascan":
+            assert self.ts_analyzer is not None
             metascan_pipeline = MetaScanAgent(
                 self.project_path,
                 self.language,
@@ -97,6 +102,20 @@ class RepoAudit:
             metascan_pipeline.start_scan()
 
         if self.args.scan_type == "dfbscan":
+            if self.dfb_engine == "staged":
+                run_full_scan(
+                    self.project_path,
+                    self.language,
+                    self.bug_type,
+                    self.model_name,
+                    is_reachable=self.is_reachable,
+                    temperature=self.temperature,
+                    call_depth=self.call_depth,
+                    max_symbolic_workers=self.max_symbolic_workers,
+                    max_neural_workers=self.max_neural_workers,
+                )
+                return
+            assert self.ts_analyzer is not None
             dfbscan_agent = DFBScanAgent(
                 self.bug_type,
                 self.is_reachable,
@@ -173,6 +192,8 @@ class RepoAudit:
 
         # For each scan type, check required parameters.
         if self.args.scan_type == "dfbscan":
+            if self.dfb_engine not in {"legacy", "staged"}:
+                err_messages.append("Error: Invalid DFB engine provided.")
             if not self.args.model_name:
                 err_messages.append("Error: --model-name is required for dfbscan.")
             if not self.args.bug_type:
@@ -221,6 +242,12 @@ def configure_args():
     parser.add_argument("--bug-type", help="Bug type for dfbscan)")
     parser.add_argument(
         "--is-reachable", action="store_true", help="Flag for bugscan reachability"
+    )
+    parser.add_argument(
+        "--dfb-engine",
+        choices=["legacy", "staged"],
+        default="legacy",
+        help="DFB engine implementation; legacy preserves the original behavior",
     )
 
     args = parser.parse_args()
