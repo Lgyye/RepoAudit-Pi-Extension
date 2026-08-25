@@ -45,12 +45,16 @@ def extract_candidates(
         _emit_preparation_failure(writer, profile, error)
         raise
 
-    return generate_candidates(
+    candidates = generate_candidates(
         profile,
         bug_type,
         analyzer,
         event_writer=writer,
     )
+    from .analysis_service import _register_candidate_batch
+
+    _register_candidate_batch(profile, analyzer, candidates, writer)
+    return candidates
 
 
 def _validate_inputs(

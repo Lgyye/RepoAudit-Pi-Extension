@@ -61,7 +61,7 @@ extractor 当前只提供单行 `Value` 信息，因此 `SourceLocation` 记录�
 - profile 源码重载、analyzer 重建、extractor 选择、支持矩阵拒绝、路径规范化、稳定 ID、候选去重/排序、空 source/sink、事件内容和失败降级测试留到 TASK-011，届时标记 `NOT RUN`。
 - 笛卡尔积优先保证候选召回率，但大型仓库可能产生较多候选；TASK-006 可依据实际数据流拒绝无效组合，后续如需无损剪枝必须另行记录规则。
 - `MLK` 仓库若未提取到任何释放 sink，当前公共 pair 协议无法形成候选；此兼容边界留待 TASK-006/TASK-009 集成时处理，不在本任务中引入虚假 sink。
-- 下一步 TASK-006 应实现单候选分析，接收一个 `AuditCandidate`，并逐项转换内部传播事实为公共 `DataFlowStep`/`DataFlowPath`，不得在该服务中重新执行全仓库候选提取。
+- 下一步 TASK-006 应实现 `analyze_candidate(run_id, candidate_id)`，按 ID 加载一个 `AuditCandidate`，并逐项转换内部传播事实为公共 `DataFlowStep`/`DataFlowPath`，不得在该服务中重新执行全仓库候选提取。此前“接收一个 `AuditCandidate`”的表述与原始总任务接口冲突，以本次复核修正为准。
 
 ## 7. 已完成的非测试检查
 
