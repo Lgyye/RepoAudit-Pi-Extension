@@ -81,9 +81,28 @@ test("doctor reports a missing API key without exposing any secret value", async
     operations: successfulOperations(),
   });
   const credential = result.checks.find((check) => check.name === "model-api-key");
+  assert.equal(result.ok, false);
   assert.equal(credential?.code, "API_KEY_MISSING");
   assert.equal(result.model.apiKeyPresent, false);
   assert.doesNotMatch(JSON.stringify(result), /api[_-]?key\s*[:=]\s*["'][^"']+/i);
+});
+
+test("doctor reports an optional missing API key without failing", async (t) => {
+  const root = await runtimeRoot(t);
+  const result = await runRepoAuditDoctor({
+    environment: {
+      REPOAUDIT_ROOT: root,
+      REPOAUDIT_MODEL: "claude-3.7",
+      REPOAUDIT_REQUIRE_API_KEY: "0",
+    },
+    operations: successfulOperations(),
+  });
+  const credential = result.checks.find((check) => check.name === "model-api-key");
+  assert.equal(result.ok, true);
+  assert.equal(credential?.ok, true);
+  assert.match(credential?.message ?? "", /not present.*optional/i);
+  assert.deepEqual(credential?.details, { present: false, required: false });
+  assert.equal(result.model.apiKeyPresent, false);
 });
 
 test("doctor preserves Python not found and version unsupported codes", async (t) => {

@@ -28,6 +28,9 @@ export interface RepoAuditFileLockOptions {
 export interface RepoAuditFileLock {
   path: string;
   metadata: RepoAuditLockMetadata;
+  readonly signal: AbortSignal;
+  readonly leaseError: RepoAuditError | null;
+  assertOwned(): void;
   release(): Promise<void>;
 }
 
@@ -129,17 +132,33 @@ async function updateHeartbeat(lockPath: string, ownerToken: string, now: number
   try {
     handle = await open(lockPath, "r+");
     const metadata = parseMetadata(await handle.readFile("utf8"));
-    if (metadata === null || metadata.ownerToken !== ownerToken) return;
+    if (metadata === null) {
+      throw new RepoAuditError("LOCK_LEASE_LOST", "RepoAudit lock metadata became unreadable during heartbeat.");
+    }
+    if (metadata.ownerToken !== ownerToken) {
+      throw new RepoAuditError("LOCK_LEASE_LOST", "RepoAudit lock owner changed during heartbeat.");
+    }
     metadata.heartbeatAt = new Date(now).toISOString();
     const buffer = Buffer.from(`${JSON.stringify(metadata)}\n`, "utf8");
     await handle.truncate(0);
     await handle.write(buffer, 0, buffer.length, 0);
     await handle.sync();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   } finally {
     await handle?.close();
   }
+  const current = await readMetadata(lockPath);
+  if (current?.ownerToken !== ownerToken) {
+    throw new RepoAuditError("LOCK_LEASE_LOST", "RepoAudit lock disappeared or was replaced during heartbeat.");
+  }
+}
+
+function normalizeLeaseError(error: unknown): RepoAuditError {
+  if (error instanceof RepoAuditError && error.code === "LOCK_LEASE_LOST") return error;
+  return new RepoAuditError(
+    "LOCK_LEASE_LOST",
+    "RepoAudit lock heartbeat failed; exclusive ownership can no longer be guaranteed.",
+    { cause: error },
+  );
 }
 
 export async function acquireRepoAuditFileLock(
@@ -173,15 +192,31 @@ export async function acquireRepoAuditFileLock(
       }
       let released = false;
       let heartbeatUpdate = Promise.resolve();
+      let leaseError: RepoAuditError | null = null;
+      const leaseController = new AbortController();
+      const heartbeatIntervalMs = Math.min(
+        options.heartbeatMs,
+        Math.max(10, Math.floor(options.staleMs / 3)),
+      );
       const timer = setInterval(() => {
+        if (leaseError !== null || released) return;
         heartbeatUpdate = heartbeatUpdate
           .then(() => updateHeartbeat(lockPath, ownerToken, now()))
-          .catch(() => undefined);
-      }, Math.min(options.heartbeatMs, Math.max(1_000, Math.floor(options.staleMs / 3))));
+          .catch((error: unknown) => {
+            leaseError = normalizeLeaseError(error);
+            clearInterval(timer);
+            leaseController.abort(leaseError);
+          });
+      }, heartbeatIntervalMs);
       timer.unref?.();
       return {
         path: lockPath,
         metadata,
+        signal: leaseController.signal,
+        get leaseError() { return leaseError; },
+        assertOwned() {
+          if (leaseError !== null) throw leaseError;
+        },
         async release() {
           if (released) return;
           released = true;

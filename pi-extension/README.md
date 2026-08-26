@@ -164,7 +164,7 @@ Tool 只接受这三个任务参数：
 | `REPOAUDIT_PYTHON` | Linux 为 `<RepoAudit>/.venv/bin/python`；Windows 为 `.venv/Scripts/python.exe` |
 | `REPOAUDIT_MODEL` | `claude-3.7` |
 | `REPOAUDIT_TIMEOUT_MS` | `1800000`，即 30 分钟；必须是正整数 |
-| `REPOAUDIT_REQUIRE_API_KEY` | 默认启用；仅设为 `0` 时跳过扫描前凭证检查，doctor 仍会如实报告缺失 |
+| `REPOAUDIT_REQUIRE_API_KEY` | 默认启用；仅设为 `0` 时跳过扫描前凭证强制检查，doctor 仍会报告缺失但不会因此整体失败 |
 | `REPOAUDIT_MAX_SYMBOLIC_WORKERS` | `4`；允许 `1..32` |
 | `REPOAUDIT_MAX_NEURAL_WORKERS` | `1`；允许 `1..8` |
 | `REPOAUDIT_LOCK_DIR` | `<RepoAudit>/lock` |
@@ -259,6 +259,7 @@ RepoAudit 将原始产物写入自身根目录，而不是待审计仓库：
 | `USER_ABORTED` | 用户取消，或取消来源无法可靠识别 | 确认后重新发起扫描 |
 | `HOST_WATCHDOG_ABORTED` | `AbortSignal.reason` 或 runtime option 明确标识宿主 watchdog | 检查宿主 watchdog 与 update 事件链路 |
 | `LOCK_TIMEOUT` | 另一个进程长期持有 RepoAudit 文件锁 | 等待活动扫描结束，或用 doctor/锁元数据排查 stale lock |
+| `LOCK_LEASE_LOST` | heartbeat 无法更新、锁文件消失或 owner token 被替换 | 停止并发扫描，检查锁存储可靠性后重试 |
 
 ## 配置与安全
 
@@ -269,7 +270,7 @@ RepoAudit 将原始产物写入自身根目录，而不是待审计仓库：
 - RepoAudit 会把被分析的源码片段发送给所选 LLM 供应商。部署前应确认代码分类、供应商协议、数据驻留和组织合规策略允许该行为。
 - 不要把 RepoAudit 根目录、`src/`、`.venv/`、`log/` 或 `result/` 目录自身作为扫描目标。
 - 插件当前没有面向业务目录的通用 allowlist 配置；生产环境应通过容器挂载、文件系统权限或独立运行账户，把可读取范围限制在获准的工作目录。
-- 进程内 Promise 队列只是轻量优化；真正的跨进程保障是 `REPOAUDIT_LOCK_DIR/repoaudit-scan.lock` 的原子 exclusive-create 文件锁。锁包含 owner token、PID、run ID、创建时间和 heartbeat；释放时只删除自己的锁，同主机 PID 仍存活时不会作为 stale 回收。
+- 进程内 Promise 队列只是轻量优化；真正的跨进程保障是 `REPOAUDIT_LOCK_DIR/repoaudit-scan.lock` 的原子 exclusive-create 文件锁。锁包含 owner token、PID、run ID、创建时间和 heartbeat；释放时只删除自己的锁，同主机 PID 仍存活时不会作为 stale 回收。heartbeat 更新失败、锁消失或 owner 被替换时，适配器会终止活动进程树并返回 `LOCK_LEASE_LOST`，不会把该运行解释为零发现。
 - 文件锁适用于具有可靠原子创建语义的共享本地文件系统。多容器并发或不保证原子语义/一致性的网络文件系统必须改用中央队列、数据库 lease 或独立 RepoAudit worker 服务，不能把本文件锁当作分布式锁。
 - 扫描取消保留 Windows `taskkill /T` 后有限 grace 再 `/F`，Unix 使用进程组 `SIGTERM` 后再 `SIGKILL`，避免遗留 Python worker。
 - `repoaudit_scan` 每 25 秒（可配置）通过 `onUpdate` 发送包含 run ID、阶段和已运行秒数的 heartbeat；可识别的 Python JSONL 进度会转为精简更新，非结构化 stdout/stderr 不转发给 Agent。

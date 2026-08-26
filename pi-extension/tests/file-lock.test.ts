@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,7 @@ import test from "node:test";
 
 import { acquireRepoAuditFileLock, type RepoAuditLockMetadata } from "../src/adapter/file-lock.js";
 import { RepoAuditError } from "../src/adapter/errors.js";
+import { runProcess } from "../src/adapter/process-runner.js";
 
 async function lockDirectory(t: test.TestContext): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "repoaudit-lock-"));
@@ -18,6 +19,17 @@ async function lockDirectory(t: test.TestContext): Promise<string> {
 
 function options(directory: string, runId: string) {
   return { directory, runId, waitTimeoutMs: 80, staleMs: 60_000, heartbeatMs: 25_000, pollMs: 10 };
+}
+
+async function waitForLeaseLoss(signal: AbortSignal, timeoutMs = 2_000): Promise<RepoAuditError> {
+  if (!signal.aborted) {
+    await Promise.race([
+      new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("lease loss timeout")), timeoutMs)),
+    ]);
+  }
+  assert.equal(signal.reason instanceof RepoAuditError, true);
+  return signal.reason as RepoAuditError;
 }
 
 test("file lock provides mutual exclusion and LOCK_TIMEOUT", async (t) => {
@@ -59,6 +71,77 @@ test("non-owner release never removes another owner's lock", async (t) => {
   await writeFile(acquired.path, `${JSON.stringify({ ...metadata, ownerToken: "replacement-owner" })}\n`, "utf8");
   await acquired.release();
   assert.equal((await stat(acquired.path)).isFile(), true);
+});
+
+test("deleted lock aborts the lease with LOCK_LEASE_LOST", async (t) => {
+  const directory = await lockDirectory(t);
+  const acquired = await acquireRepoAuditFileLock({
+    ...options(directory, "run_11111111111111111111111111111111"),
+    heartbeatMs: 10,
+    staleMs: 60,
+  });
+  await unlink(acquired.path);
+  assert.equal((await waitForLeaseLoss(acquired.signal)).code, "LOCK_LEASE_LOST");
+  await acquired.release();
+});
+
+test("replacement owner aborts the original lease and is not removed on release", async (t) => {
+  const directory = await lockDirectory(t);
+  const acquired = await acquireRepoAuditFileLock({
+    ...options(directory, "run_11111111111111111111111111111111"),
+    heartbeatMs: 10,
+    staleMs: 60,
+  });
+  const replacement = { ...acquired.metadata, ownerToken: "replacement-owner" };
+  await writeFile(acquired.path, `${JSON.stringify(replacement)}\n`, "utf8");
+  assert.equal((await waitForLeaseLoss(acquired.signal)).code, "LOCK_LEASE_LOST");
+  await acquired.release();
+  assert.equal(JSON.parse(await readFile(acquired.path, "utf8")).ownerToken, "replacement-owner");
+});
+
+test("heartbeat IO failure aborts the lease and release reports its own failure", async (t) => {
+  const directory = await lockDirectory(t);
+  const acquired = await acquireRepoAuditFileLock({
+    ...options(directory, "run_11111111111111111111111111111111"),
+    heartbeatMs: 10,
+    staleMs: 60,
+  });
+  await unlink(acquired.path);
+  await mkdir(acquired.path);
+  assert.equal((await waitForLeaseLoss(acquired.signal)).code, "LOCK_LEASE_LOST");
+  await assert.rejects(acquired.release());
+});
+
+test("lease loss terminates the active process while a replacement owner holds the lock", async (t) => {
+  const directory = await lockDirectory(t);
+  const first = await acquireRepoAuditFileLock({
+    ...options(directory, "run_11111111111111111111111111111111"),
+    heartbeatMs: 10,
+    staleMs: 60,
+  });
+  const running = runProcess({
+    command: process.execPath,
+    args: ["-e", "setInterval(() => {}, 1000)"],
+    cwd: process.cwd(),
+    env: process.env,
+    timeoutMs: 5_000,
+    signal: first.signal,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await unlink(first.path);
+  const second = await acquireRepoAuditFileLock({
+    ...options(directory, "run_22222222222222222222222222222222"),
+    heartbeatMs: 10,
+    staleMs: 60,
+  });
+  const startedAt = Date.now();
+  const result = await running;
+  assert.equal(result.aborted, true);
+  assert.equal((await waitForLeaseLoss(first.signal)).code, "LOCK_LEASE_LOST");
+  assert.ok(Date.now() - startedAt < 2_000, "the old process must not remain concurrent for long");
+  await first.release();
+  assert.equal(JSON.parse(await readFile(second.path, "utf8")).ownerToken, second.metadata.ownerToken);
+  await second.release();
 });
 
 test("stale lock from another hostname is not deleted without a central lease", async (t) => {

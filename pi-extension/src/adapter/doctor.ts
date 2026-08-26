@@ -181,9 +181,26 @@ export async function runRepoAuditDoctor(
       details: { credentialEnvironmentName: config.apiKeyEnvironmentName },
     });
     const present = Boolean(environment[config.apiKeyEnvironmentName]?.trim());
-    checks.push(present
-      ? { name: "model-api-key", ok: true, message: "credential is present", details: { present: true } }
-      : failureCheck("model-api-key", new RepoAuditError("API_KEY_MISSING", `${config.apiKeyEnvironmentName} is not set.`)));
+    if (present) {
+      checks.push({
+        name: "model-api-key",
+        ok: true,
+        message: "credential is present",
+        details: { present: true, required: config.requireApiKey },
+      });
+    } else if (config.requireApiKey) {
+      checks.push(failureCheck(
+        "model-api-key",
+        new RepoAuditError("API_KEY_MISSING", `${config.apiKeyEnvironmentName} is not set.`),
+      ));
+    } else {
+      checks.push({
+        name: "model-api-key",
+        ok: true,
+        message: "credential is not present (optional because REPOAUDIT_REQUIRE_API_KEY=0)",
+        details: { present: false, required: false },
+      });
+    }
   }
 
   for (const [name, directory] of [

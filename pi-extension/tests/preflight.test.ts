@@ -11,6 +11,7 @@ import {
 } from "../src/adapter/config.js";
 import { RepoAuditError } from "../src/adapter/errors.js";
 import {
+  assertModelCredential,
   preflightRepoAudit,
   validateRepoAuditOptions,
   validateRepositoryInput,
@@ -91,6 +92,17 @@ test("Python executable 不存在 -> PYTHON_NOT_FOUND", async (t) => {
   await assert.rejects(
     preflightRepoAudit(pythonOptions(repository), config(root, path.join(root, "missing-python"))),
     (error: unknown) => error instanceof RepoAuditError && error.code === "PYTHON_NOT_FOUND",
+  );
+});
+
+test("preflight credential policy matches REPOAUDIT_REQUIRE_API_KEY", () => {
+  const optional = config(process.cwd());
+  assert.equal(assertModelCredential(optional), false);
+
+  const required = { ...optional, requireApiKey: true };
+  assert.throws(
+    () => assertModelCredential(required),
+    (error: unknown) => error instanceof RepoAuditError && error.code === "API_KEY_MISSING",
   );
 });
 

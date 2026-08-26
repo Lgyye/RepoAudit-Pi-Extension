@@ -20,6 +20,7 @@ const RECOVERABLE_CODES = new Set<RepoAuditErrorCode>([
   "USER_ABORTED",
   "HOST_WATCHDOG_ABORTED",
   "LOCK_TIMEOUT",
+  "LOCK_LEASE_LOST",
 ]);
 
 export const RECOVERY_SUGGESTIONS: Record<RepoAuditErrorCode, string> = {
@@ -39,6 +40,7 @@ export const RECOVERY_SUGGESTIONS: Record<RepoAuditErrorCode, string> = {
   USER_ABORTED: "Start a new scan when cancellation is no longer desired.",
   HOST_WATCHDOG_ABORTED: "Check the host watchdog and heartbeat propagation before retrying the scan.",
   LOCK_TIMEOUT: "Wait for the active scan to finish or investigate a stale lock with RepoAudit doctor.",
+  LOCK_LEASE_LOST: "Stop concurrent scans, verify lock storage reliability, and retry after the active owner is known.",
   RESULT_NOT_FOUND: "Inspect the run log and retry; the scan did not produce the required artifact evidence.",
   RESULT_AMBIGUOUS: "Ensure only one runtime writes the artifact tree and retry under the RepoAudit lock.",
   RESULT_PARSE_ERROR: "Preserve the artifact for diagnosis and verify runtime/plugin version compatibility.",

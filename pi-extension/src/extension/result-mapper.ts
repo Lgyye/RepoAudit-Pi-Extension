@@ -75,6 +75,7 @@ const SAFE_ERROR_MESSAGES: Record<RepoAuditErrorCode, string> = {
   USER_ABORTED: "RepoAudit analysis was cancelled by the user or an unspecified caller.",
   HOST_WATCHDOG_ABORTED: "RepoAudit analysis was cancelled by an explicitly identified host watchdog.",
   LOCK_TIMEOUT: "RepoAudit could not acquire the cross-process scan lock in time.",
+  LOCK_LEASE_LOST: "RepoAudit stopped because exclusive scan ownership was lost during execution.",
 };
 
 function executionSummary(execution: RepoAuditExecutionInfo): RepoAuditToolExecutionSummary {

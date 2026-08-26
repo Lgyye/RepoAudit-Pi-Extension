@@ -352,8 +352,13 @@ export async function preflightRepoAudit(
   const pythonVersion = await getPythonVersion(config);
   await assertDependencies(config);
   await assertTreeSitter(options.language, config);
+  const apiKeyAvailable = assertModelCredential(config);
+  return { repoPath, pythonVersion, apiKeyAvailable };
+}
+
+export function assertModelCredential(config: RepoAuditRuntimeConfig): boolean {
   const apiKeyAvailable =
-    config.apiKeyEnvironmentName === null ||
+    config.apiKeyEnvironmentName !== null &&
     Boolean(config.environment[config.apiKeyEnvironmentName]?.trim());
   if (config.apiKeyEnvironmentName === null) {
     throw new RepoAuditError(
@@ -367,5 +372,5 @@ export async function preflightRepoAudit(
       `缺少 ${config.apiKeyEnvironmentName}。`,
     );
   }
-  return { repoPath, pythonVersion, apiKeyAvailable };
+  return apiKeyAvailable;
 }

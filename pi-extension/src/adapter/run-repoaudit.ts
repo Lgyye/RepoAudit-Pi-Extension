@@ -254,6 +254,7 @@ async function appendExecutionLog(
   config: RepoAuditRuntimeConfig,
   result: RepoAuditResult,
   terminationSource: string | null,
+  lockReleaseFailed = false,
 ): Promise<void> {
   if (!config.repoAuditRoot) return;
   try {
@@ -273,6 +274,8 @@ async function appendExecutionLog(
       reportPath: safeRelativeArtifact(config.repoAuditRoot, result.reportPath),
       logPath: safeRelativeArtifact(config.repoAuditRoot, result.logPath),
       artifactIsolation: result.execution.artifactIsolation,
+      lockReleaseFailed,
+      lockReleaseErrorCode: lockReleaseFailed ? "LOCK_RELEASE_FAILED" : null,
       endedAt: result.execution.endedAt,
     };
     await appendFile(path.join(directory, "repoaudit-pi.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
@@ -305,8 +308,9 @@ async function executeRepoAudit(
   let pythonVersion = "unknown";
   let processResult: ProcessRunResult | undefined;
   let artifacts: LocatedArtifacts | undefined;
-  let finalResult: RepoAuditResult;
+  let finalResult!: RepoAuditResult;
   let terminationSource: string | null = null;
+  let lockReleaseFailed = false;
   let fileLock: Awaited<ReturnType<typeof acquireRepoAuditFileLock>> | undefined;
   try {
     if (
@@ -326,10 +330,14 @@ async function executeRepoAudit(
     });
     emitProgress(runtimeOptions, runId, "preflight", startedAtMs);
     const preflight = await preflightRepoAudit(options, config);
+    fileLock.assertOwned();
     repoPath = preflight.repoPath;
     pythonVersion = preflight.pythonVersion;
     const before = await snapshotArtifacts(options, repoPath, config);
     emitProgress(runtimeOptions, runId, "python_start", startedAtMs);
+    const processSignal = runtimeOptions.signal === undefined
+      ? fileLock.signal
+      : AbortSignal.any([runtimeOptions.signal, fileLock.signal]);
     processResult = await runProcess({
       command: config.pythonExecutable,
       args: buildRepoAuditArgs(options, config, repoPath, runId),
@@ -341,8 +349,12 @@ async function executeRepoAudit(
         const phase = progressPhaseFromLine(line, runId);
         if (phase !== null) emitProgress(runtimeOptions, runId, phase, startedAtMs);
       },
-      ...(runtimeOptions.signal === undefined ? {} : { signal: runtimeOptions.signal }),
+      signal: processSignal,
     });
+    if (fileLock.leaseError !== null) {
+      terminationSource = "lock_lease_lost";
+      throw fileLock.leaseError;
+    }
     const terminationError = processTerminationError(processResult, runtimeOptions);
     if (processResult.timedOut) {
       terminationSource = "plugin";
@@ -361,9 +373,11 @@ async function executeRepoAudit(
     }
     emitProgress(runtimeOptions, runId, "artifact_validation", startedAtMs);
     const after = await snapshotArtifacts(options, repoPath, config);
+    fileLock.assertOwned();
     artifacts = await locateArtifacts(before, after, config, runId);
     const execution = executionFromProcess(runId, config, pythonVersion, processResult, artifacts);
     const parsed = await parseRunArtifacts(artifacts, processResult.stdout, options.bugType);
+    fileLock.assertOwned();
     finalResult = {
       status: parsed.status,
       tool: "repoaudit",
@@ -381,15 +395,32 @@ async function executeRepoAudit(
     if (normalized.code === "USER_ABORTED" && runtimeOptions.signal?.aborted) normalized = abortError(runtimeOptions);
     if (normalized.code === "HOST_WATCHDOG_ABORTED") terminationSource ??= "host_watchdog";
     if (normalized.code === "USER_ABORTED") terminationSource ??= "user_abort";
+    if (normalized.code === "LOCK_LEASE_LOST") terminationSource = "lock_lease_lost";
     const execution = processResult === undefined
       ? baseExecution(runId, config, startedAtDate)
       : executionFromProcess(runId, config, pythonVersion, processResult, artifacts);
     finalResult = failedResult(options, repoPath, execution, normalized, artifacts);
   } finally {
-    await fileLock?.release().catch(() => undefined);
+    if (fileLock !== undefined) {
+      try {
+        await fileLock.release();
+      } catch {
+        lockReleaseFailed = true;
+      }
+      if (fileLock.leaseError !== null && finalResult.status !== "failed") {
+        terminationSource = "lock_lease_lost";
+        finalResult = failedResult(
+          options,
+          repoPath,
+          finalResult.execution,
+          fileLock.leaseError,
+          artifacts,
+        );
+      }
+    }
   }
   emitProgress(runtimeOptions, runId, "completed", startedAtMs);
-  await appendExecutionLog(config, finalResult, terminationSource);
+  await appendExecutionLog(config, finalResult, terminationSource, lockReleaseFailed);
   return finalResult;
 }
 
