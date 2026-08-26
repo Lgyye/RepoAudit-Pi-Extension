@@ -48,6 +48,7 @@ from protocol import (
     ValidationResult,
     new_run_id,
     utc_now,
+    validate_run_id,
 )
 from service import (
     analyze_candidate,
@@ -72,8 +73,9 @@ class DFBScanAgent(Agent):
         model_name: str,
         temperature: float,
         call_depth: int,
-        max_neural_workers: int = 30,
+        max_neural_workers: int = 1,
         agent_id: int = 0,
+        run_id: Optional[str] = None,
     ) -> None:
         self.bug_type = bug_type
         self.is_reachable = is_reachable
@@ -89,15 +91,22 @@ class DFBScanAgent(Agent):
         self.call_depth = call_depth
         self.max_neural_workers = max_neural_workers
         self.MAX_QUERY_NUM = 5
+        self.run_id = None if run_id is None else validate_run_id(run_id)
 
         self.lock = threading.Lock()
 
         with self.lock:
-            self.log_dir_path = f"{BASE_PATH}/log/dfbscan/{self.model_name}/{self.bug_type}/{self.language}/{self.project_name}/{time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime())}-{agent_id}"
-            self.res_dir_path = f"{BASE_PATH}/result/dfbscan/{self.model_name}/{self.bug_type}/{self.language}/{self.project_name}/{time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime())}-{agent_id}"
+            artifact_id = self.run_id or (
+                time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
+                + f"-{agent_id}"
+            )
+            self.log_dir_path = f"{BASE_PATH}/log/dfbscan/{self.model_name}/{self.bug_type}/{self.language}/{self.project_name}/{artifact_id}"
+            self.res_dir_path = f"{BASE_PATH}/result/dfbscan/{self.model_name}/{self.bug_type}/{self.language}/{self.project_name}/{artifact_id}"
             if not os.path.exists(self.log_dir_path):
                 os.makedirs(self.log_dir_path)
             self.logger = Logger(self.log_dir_path + "/" + "dfbscan.log")
+            if self.run_id is not None:
+                self.logger.print_log("RepoAudit run ID:", self.run_id)
 
             if not os.path.exists(self.res_dir_path):
                 os.makedirs(self.res_dir_path)
@@ -838,9 +847,10 @@ def run_full_scan(
     is_reachable: bool = False,
     temperature: float = 0.5,
     call_depth: int = 3,
-    max_symbolic_workers: int = 30,
+    max_symbolic_workers: int = 4,
     max_neural_workers: int = 1,
     run_store: Optional[RunStore] = None,
+    run_id: Optional[str] = None,
 ) -> AuditRun:
     """Compose the staged services into one compatibility-preserving scan."""
 
@@ -859,7 +869,7 @@ def run_full_scan(
     if not repository_root.is_dir():
         raise ValueError("project_path must resolve to a directory")
     run = AuditRun(
-        run_id=new_run_id(),
+        run_id=new_run_id() if run_id is None else validate_run_id(run_id),
         repository_root=repository_root.as_posix(),
         language=language,
         bug_type=bug_type,
@@ -893,6 +903,7 @@ def run_full_scan(
                 model_name,
                 bug_type,
                 language,
+                run.run_id,
             )
             fixed_logger = Logger(str(log_file))
             fixed_logger.print_log("Staged RepoAudit full scan started.", run.run_id)
@@ -1144,9 +1155,14 @@ def _staged_artifact_paths(
     model_name: str,
     bug_type: str,
     language: str,
+    run_id: Optional[str] = None,
 ) -> Tuple[Path, Path]:
     project_name = repository_root.name
-    stamp = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime()) + "-0"
+    stamp = (
+        validate_run_id(run_id)
+        if run_id is not None
+        else time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime()) + "-0"
+    )
     result_directory = (
         BASE_PATH
         / "result"

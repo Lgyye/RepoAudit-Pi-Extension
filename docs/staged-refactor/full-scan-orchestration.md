@@ -68,7 +68,7 @@ python src/repoaudit.py \
 
 ## 5. 旧 `detect_info.json` 兼容
 
-staged 引擎仍在原 `result/dfbscan/<model>/<bug>/<language>/<project>/<timestamp>-0/` 树下写 `detect_info.json`，包括零发现时的空对象 `{}`。
+staged 引擎仍在原 `result/dfbscan/<model>/<bug>/<language>/<project>/` 树下写 `detect_info.json`，包括零发现时的空对象 `{}`。未显式传入 `--run-id` 时继续使用内部生成的 `run_<uuid>`；Pi Extension 会传入自己的 `run_<32 hex>`，因此结果目录末级与该次 Tool 调用的 run ID 一致。
 
 每个接受的验证结果转换为旧五字段：
 
@@ -90,7 +90,7 @@ staged 引擎仍在原 `result/dfbscan/<model>/<bug>/<language>/<project>/<times
 - staged 引擎只对 TASK-006 已产生的完整路径调用 Path Validator；没有公共路径时不会伪造验证输入。
 - staged 日志不再复制完整 Prompt/响应，这是安全收紧；旧 `legacy` 引擎日志行为保持不变。
 - staged 零发现时会明确写 `{}`，旧引擎历史上可能不创建文件；消费者看到文件时的顶层对象和五字段形状保持兼容。
-- staged 结果路径中的语言、漏洞类型和模型名必须是单个路径组件；包含 `/`、`\\`、`.` 或 `..` 的值会在创建运行产物前被拒绝。旧 `legacy` 引擎不受该收紧影响。
+- staged 结果路径中的语言、漏洞类型和模型名必须是单个路径组件；包含 `/`、`\\`、`.` 或 `..` 的值会在创建运行产物前被拒绝。Pi Extension 对 legacy 调用的模型名也执行同样的路径组件校验；直接调用旧 CLI 且不使用插件时仍保留原行为。
 
 ## 7. 修改文件
 

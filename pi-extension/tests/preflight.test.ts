@@ -19,11 +19,17 @@ import {
 function config(root: string, pythonExecutable = process.execPath): RepoAuditRuntimeConfig {
   return {
     repoAuditRoot: root,
+    rootSource: "explicit",
     repoAuditSrcDirectory: path.join(root, "src"),
     repoAuditEntryPoint: path.join(root, "src", "repoaudit.py"),
     pythonExecutable,
     treeSitterLibrary: path.join(root, "lib", "build", "my-languages.so"),
+    runsDirectory: path.join(root, "runs"),
+    lockDirectory: path.join(root, "lock"),
     defaultTimeoutMs: 10_000,
+    lockTimeoutMs: 10_000,
+    lockStaleMs: 60_000,
+    heartbeatMs: 25_000,
     modelName: "claude-3.7",
     temperature: 0,
     callDepth: 3,
@@ -45,21 +51,21 @@ function pythonOptions(repoPath: string): RepoAuditRunOptions {
   return { repoPath, language: "Python", bugType: "NPD" };
 }
 
-test("repoPath 不存在 -> REPO_NOT_FOUND", async (t) => {
+test("repoPath 不存在 -> REPOSITORY_NOT_FOUND", async (t) => {
   const root = await temporaryDirectory(t);
   await assert.rejects(
     validateRepositoryInput(pythonOptions(path.join(root, "missing")), config(root)),
-    (error: unknown) => error instanceof RepoAuditError && error.code === "REPO_NOT_FOUND",
+    (error: unknown) => error instanceof RepoAuditError && error.code === "REPOSITORY_NOT_FOUND",
   );
 });
 
-test("repoPath 不是目录 -> REPO_NOT_FOUND", async (t) => {
+test("repoPath 不是目录 -> REPOSITORY_NOT_FOUND", async (t) => {
   const root = await temporaryDirectory(t);
   const file = path.join(root, "file.py");
   await writeFile(file, "print('x')\n", "utf8");
   await assert.rejects(
     validateRepositoryInput(pythonOptions(file), config(root)),
-    (error: unknown) => error instanceof RepoAuditError && error.code === "REPO_NOT_FOUND",
+    (error: unknown) => error instanceof RepoAuditError && error.code === "REPOSITORY_NOT_FOUND",
   );
 });
 
@@ -124,6 +130,17 @@ test("Cpp + NPD args 包含 --is-reachable 且 repoPath 是独立 argv", () => {
   );
   assert.equal(args.includes("--is-reachable"), true);
   assert.equal(args[args.indexOf("--project-path") + 1], repoPath);
+});
+
+test("run ID is passed as a separate backward-compatible CLI argument", () => {
+  const runId = "run_0123456789abcdef0123456789abcdef";
+  const args = buildRepoAuditArgs(
+    { repoPath: "C:/repo", language: "Python", bugType: "NPD" },
+    config("C:/RepoAudit"),
+    "C:/repo",
+    runId,
+  );
+  assert.equal(args[args.indexOf("--run-id") + 1], runId);
 });
 
 for (const directoryName of ["repo with spaces", "中文仓库"]) {

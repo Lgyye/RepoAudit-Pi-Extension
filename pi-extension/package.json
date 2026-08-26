@@ -1,13 +1,20 @@
 {
   "name": "@repoaudit/typescript-adapter",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "Pi Extension and standalone TypeScript adapter for the existing RepoAudit Python runtime",
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/src/index.js"
     ]
+  },
+  "files": [
+    "dist/src/",
+    "README.md"
+  ],
+  "bin": {
+    "repoaudit-doctor": "./dist/src/doctor-cli.js"
   },
   "exports": {
     ".": {
@@ -21,17 +28,21 @@
     "test": "npm run build && node --test dist/tests/*.test.js",
     "lint": "tsc -p tsconfig.json --noEmit",
     "smoke": "npm run build && node dist/tests/standalone-smoke.js",
-    "verify:extension-load": "node tests/verify-extension-load.mjs"
+    "doctor": "npm run build && node dist/src/doctor-cli.js",
+    "verify:extension-load": "npm run build && node tests/verify-extension-load.mjs",
+    "verify:pack": "npm run build && node tests/verify-pack.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "typebox": "1.3.7"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.1",
-    "@types/node": "^24.0.0",
-    "typebox": "1.3.7",
-    "typescript": "^5.9.0"
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1",
-    "typebox": "1.3.7"
+    "@earendil-works/pi-coding-agent": "0.84.1"
   },
   "engines": {
     "node": ">=22.19.0"

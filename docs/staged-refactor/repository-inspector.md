@@ -21,7 +21,7 @@ inspect_repository(
     *,
     run_id=None,
     event_writer=None,
-    max_symbolic_workers=30,
+    max_symbolic_workers=4,
 ) -> RepositoryProfile
 ```
 

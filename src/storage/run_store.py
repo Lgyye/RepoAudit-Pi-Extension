@@ -71,7 +71,12 @@ class RunStore:
     """Save and load staged results without allowing runs to overlap."""
 
     def __init__(self, root: Optional[Path] = None) -> None:
-        selected = DEFAULT_RUNS_ROOT if root is None else Path(root)
+        configured_root = os.environ.get("REPOAUDIT_RUNS_ROOT")
+        selected = (
+            Path(configured_root)
+            if root is None and configured_root
+            else DEFAULT_RUNS_ROOT if root is None else Path(root)
+        )
         self.root = selected.expanduser().resolve()
         self._lock = threading.RLock()
 

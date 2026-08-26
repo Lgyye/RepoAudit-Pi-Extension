@@ -7,6 +7,8 @@ export interface ProcessRunRequest {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   signal?: AbortSignal;
+  terminationGraceMs?: number;
+  onStdoutLine?: (line: string) => void;
 }
 
 export interface ProcessRunResult {
@@ -46,20 +48,35 @@ function waitForClose(child: ChildProcess, timeoutMs: number): Promise<void> {
   });
 }
 
-export async function terminateProcessTree(child: ChildProcess): Promise<void> {
+export async function terminateProcessTree(
+  child: ChildProcess,
+  graceMs = 1_000,
+): Promise<void> {
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
     await new Promise<void>((resolve) => {
       const killer = spawn(
         "taskkill.exe",
-        ["/PID", String(child.pid), "/T", "/F"],
+        ["/PID", String(child.pid), "/T"],
         { shell: false, windowsHide: true, stdio: "ignore" },
       );
       killer.once("error", () => resolve());
       killer.once("close", () => resolve());
     });
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await waitForClose(child, 2_000);
+    await waitForClose(child, graceMs);
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        const killer = spawn(
+          "taskkill.exe",
+          ["/PID", String(child.pid), "/T", "/F"],
+          { shell: false, windowsHide: true, stdio: "ignore" },
+        );
+        killer.once("error", () => resolve());
+        killer.once("close", () => resolve());
+      });
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await waitForClose(child, 2_000);
+    }
     return;
   }
 
@@ -68,7 +85,7 @@ export async function terminateProcessTree(child: ChildProcess): Promise<void> {
   } catch {
     child.kill("SIGTERM");
   }
-  await waitForClose(child, 750);
+  await waitForClose(child, graceMs);
   if (child.exitCode === null && child.signalCode === null) {
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -90,6 +107,8 @@ export function runProcess(request: ProcessRunRequest): Promise<ProcessRunResult
     let timedOut = false;
     let spawnError: NodeJS.ErrnoException | null = null;
     let settled = false;
+    let stdoutLineBuffer = "";
+    let terminating = false;
 
     if (aborted) {
       const endedAtDate = new Date();
@@ -118,10 +137,11 @@ export function runProcess(request: ProcessRunRequest): Promise<ProcessRunResult
       detached: process.platform !== "win32",
     });
 
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
       request.signal?.removeEventListener("abort", onAbort);
       const endedAtDate = new Date();
       resolve({
@@ -141,19 +161,31 @@ export function runProcess(request: ProcessRunRequest): Promise<ProcessRunResult
     };
 
     const onAbort = (): void => {
+      if (terminating) return;
+      terminating = true;
       aborted = true;
-      void terminateProcessTree(child);
+      if (timeout !== undefined) clearTimeout(timeout);
+      void terminateProcessTree(child, request.terminationGraceMs ?? 1_000);
     };
     request.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
+      if (terminating) return;
+      terminating = true;
       timedOut = true;
-      void terminateProcessTree(child);
+      request.signal?.removeEventListener("abort", onAbort);
+      void terminateProcessTree(child, request.terminationGraceMs ?? 1_000);
     }, request.timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       stdout = appendCapture(stdout, chunk);
+      if (request.onStdoutLine !== undefined) {
+        stdoutLineBuffer += chunk.toString("utf8");
+        const lines = stdoutLineBuffer.split(/\r?\n/);
+        stdoutLineBuffer = lines.pop() ?? "";
+        for (const line of lines) request.onStdoutLine(line);
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.length;
@@ -163,6 +195,11 @@ export function runProcess(request: ProcessRunRequest): Promise<ProcessRunResult
       spawnError = error;
       finish(null, null);
     });
-    child.once("close", (exitCode, signal) => finish(exitCode, signal));
+    child.once("close", (exitCode, signal) => {
+      if (stdoutLineBuffer !== "" && request.onStdoutLine !== undefined) {
+        request.onStdoutLine(stdoutLineBuffer);
+      }
+      finish(exitCode, signal);
+    });
   });
 }

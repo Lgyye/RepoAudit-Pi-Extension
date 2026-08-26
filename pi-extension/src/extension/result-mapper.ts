@@ -35,6 +35,9 @@ export interface RepoAuditToolProgressDetails {
   tool: "RepoAudit";
   phase: "preparing" | "running" | "processing";
   message: string;
+  runId: string;
+  elapsedSeconds: number;
+  heartbeat: boolean;
 }
 
 export type RepoAuditToolDetails =
@@ -47,16 +50,17 @@ export interface RepoAuditToolFailureDetails extends RepoAuditToolFinalDetails {
     code: RepoAuditErrorCode;
     message: string;
     recoverable: boolean;
+    suggestion: string;
   };
 }
 
 const SAFE_ERROR_MESSAGES: Record<RepoAuditErrorCode, string> = {
-  REPO_NOT_FOUND: "The requested repository path does not exist or is not a directory.",
+  RUNTIME_NOT_FOUND: "The RepoAudit runtime could not be located or is incomplete.",
+  REPOSITORY_NOT_FOUND: "The requested repository path does not exist or is not a directory.",
   NO_ANALYZABLE_FILES: "No source files matching the selected language were found.",
-  REPOAUDIT_NOT_FOUND: "The RepoAudit runtime installation is incomplete.",
   PYTHON_NOT_FOUND: "The configured RepoAudit Python runtime is unavailable.",
   PYTHON_VERSION_UNSUPPORTED: "The configured Python version is not supported by this RepoAudit runtime.",
-  DEPENDENCY_ERROR: "The RepoAudit Python runtime is missing a required dependency.",
+  DEPENDENCY_MISSING: "The RepoAudit Python runtime is missing a required dependency.",
   TREE_SITTER_NOT_READY: "The RepoAudit Tree-sitter runtime is not ready for the selected language.",
   API_KEY_MISSING: "RepoAudit analysis could not complete because the configured model credential is unavailable.",
   UNSUPPORTED_LANGUAGE: "The requested source language is not supported by RepoAudit.",
@@ -67,8 +71,10 @@ const SAFE_ERROR_MESSAGES: Record<RepoAuditErrorCode, string> = {
   RESULT_NOT_FOUND: "RepoAudit did not produce the required result artifact.",
   RESULT_AMBIGUOUS: "RepoAudit produced ambiguous result artifacts; retry the scan serially.",
   RESULT_PARSE_ERROR: "RepoAudit produced a result artifact that could not be safely parsed.",
-  ABORTED: "RepoAudit analysis was cancelled.",
-  TIMEOUT: "RepoAudit analysis timed out.",
+  SCAN_TIMEOUT: "RepoAudit analysis timed out inside the plugin.",
+  USER_ABORTED: "RepoAudit analysis was cancelled by the user or an unspecified caller.",
+  HOST_WATCHDOG_ABORTED: "RepoAudit analysis was cancelled by an explicitly identified host watchdog.",
+  LOCK_TIMEOUT: "RepoAudit could not acquire the cross-process scan lock in time.",
 };
 
 function executionSummary(execution: RepoAuditExecutionInfo): RepoAuditToolExecutionSummary {
@@ -155,6 +161,7 @@ export class RepoAuditToolExecutionError extends Error {
       `Error code: ${details.error.code}`,
       `Message: ${details.error.message}`,
       `Recoverable: ${details.error.recoverable ? "yes" : "no"}`,
+      `Suggestion: ${details.error.suggestion}`,
     ];
     if (details.logPath !== null) lines.push(`Log path: ${details.logPath}`);
     super(lines.join("\n"));
@@ -175,6 +182,7 @@ export function mapRepoAuditResult(
         code,
         message: SAFE_ERROR_MESSAGES[code],
         recoverable: result.error?.recoverable ?? false,
+        suggestion: result.error?.suggestion ?? "Inspect RepoAudit doctor output and retry.",
       },
     };
     throw new RepoAuditToolExecutionError(details);
@@ -189,9 +197,12 @@ export function mapRepoAuditResult(
 export function progressResult(
   phase: RepoAuditToolProgressDetails["phase"],
   message: string,
+  runId: string,
+  elapsedSeconds: number,
+  heartbeat = false,
 ): AgentToolResult<RepoAuditToolDetails> {
   return {
     content: [{ type: "text", text: message }],
-    details: { tool: "RepoAudit", phase, message },
+    details: { tool: "RepoAudit", phase, message, runId, elapsedSeconds, heartbeat },
   };
 }

@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
+import { readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { runProcess } from "../src/adapter/process-runner.js";
-import { withRepoAuditLock } from "../src/adapter/run-repoaudit.js";
+import {
+  abortCodeFromRuntimeOptions,
+  processTerminationError,
+  withRepoAuditLock,
+} from "../src/adapter/run-repoaudit.js";
 
 function request(args: readonly string[], timeoutMs = 5_000) {
   return {
@@ -41,16 +48,34 @@ test("repoPath 含空格与中文时保持单个 argv", async () => {
   assert.equal(result.stdout, value);
 });
 
-test("AbortSignal 终止进程树并只完成一次", async () => {
+test("AbortSignal 终止父进程及其子进程树并只完成一次", async (t) => {
+  const pidFile = path.join(os.tmpdir(), `repoaudit-child-${process.pid}-${Date.now()}.pid`);
+  t.after(() => rm(pidFile, { force: true }));
   const controller = new AbortController();
   const pending = runProcess({
-    ...request(["-e", "setInterval(() => {}, 1000)"], 5_000),
+    ...request([
+      "-e",
+      "const{spawn}=require('node:child_process');const{writeFileSync}=require('node:fs');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(process.argv[1],String(c.pid));setInterval(()=>{},1000)",
+      pidFile,
+    ], 5_000),
     signal: controller.signal,
   });
-  setTimeout(() => controller.abort(), 80);
+  let childPid = 0;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      childPid = Number(await readFile(pidFile, "utf8"));
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  assert.equal(Number.isSafeInteger(childPid) && childPid > 0, true);
+  controller.abort();
   const result = await pending;
   assert.equal(result.aborted, true);
   assert.equal(result.timedOut, false);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.throws(() => process.kill(childPid, 0));
 });
 
 test("timeout 终止进程树", async () => {
@@ -85,8 +110,31 @@ test("等待 mutex 时 abort 不会执行 action", async () => {
   const second = withRepoAuditLock(async () => {
     ran = true;
   }, controller.signal);
+  const rejected = assert.rejects(second);
   controller.abort();
   await first;
-  await assert.rejects(second);
+  await rejected;
   assert.equal(ran, false);
+});
+
+test("plugin timeout and AbortSignal cancellation have distinct stable codes", () => {
+  assert.equal(
+    processTerminationError({ aborted: false, timedOut: true }, {})?.code,
+    "SCAN_TIMEOUT",
+  );
+  assert.equal(
+    processTerminationError({ aborted: true, timedOut: false }, {})?.code,
+    "USER_ABORTED",
+  );
+});
+
+test("HOST_WATCHDOG_ABORTED requires an explicit abort source or reason", () => {
+  assert.equal(abortCodeFromRuntimeOptions({}), "USER_ABORTED");
+  assert.equal(abortCodeFromRuntimeOptions({ abortSource: "host_watchdog" }), "HOST_WATCHDOG_ABORTED");
+  const controller = new AbortController();
+  controller.abort({ source: "host_watchdog" });
+  assert.equal(abortCodeFromRuntimeOptions({ signal: controller.signal }), "HOST_WATCHDOG_ABORTED");
+  const unknown = new AbortController();
+  unknown.abort("idle timeout maybe");
+  assert.equal(abortCodeFromRuntimeOptions({ signal: unknown.signal }), "USER_ABORTED");
 });

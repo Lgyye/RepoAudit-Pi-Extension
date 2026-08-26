@@ -184,7 +184,7 @@ staged 完整扫描还会在原 `result/dfbscan/.../detect_info.json` 路径生�
 
 ## Pi Agent 插件
 
-外部插件位于 [`pi-extension/`](./pi-extension/)，向 Pi Agent 注册 `repoaudit_scan` Tool，通过子进程调用 RepoAudit Python 运行时。当前插件继续使用 legacy CLI，并保留超时、取消、路径校验、结果归一化和敏感信息过滤。
+外部插件位于 [`pi-extension/`](./pi-extension/)，向 Pi Agent 注册 `repoaudit_scan` Tool，通过子进程调用 RepoAudit Python 运行时。插件继续兼容 legacy CLI，同时提供独立 doctor、唯一 run ID、长任务 heartbeat、进程树取消、跨进程文件锁、稳定错误语义、结果归一化和敏感信息过滤。
 
 Tool 的核心参数为：
 
@@ -196,7 +196,7 @@ Tool 的核心参数为：
 }
 ```
 
-安装、配置和结果语义见 [Pi Extension 使用文档](./pi-extension/README.md)。
+安装、配置和结果语义见 [Pi Extension 使用文档](./pi-extension/README.md)；后续宿主与容器改造见 [SecHeur 第二阶段集成清单](./docs/secheur-integration.md)。
 
 ## 项目资源
 

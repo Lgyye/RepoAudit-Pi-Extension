@@ -30,7 +30,7 @@ from tstool.analyzer.TS_analyzer import TSAnalyzer
 
 PathInput = Union[str, os.PathLike[str]]
 
-DEFAULT_MAX_SYMBOLIC_WORKERS = 30
+DEFAULT_MAX_SYMBOLIC_WORKERS = 4
 
 LANGUAGE_SUFFIXES = {
     "Cpp": ("cpp", "cc", "hpp", "c", "h"),

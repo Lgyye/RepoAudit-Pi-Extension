@@ -33,6 +33,7 @@ function result(overrides: Partial<RepoAuditResult> = {}): RepoAuditResult {
       logDirectory: "C:/RepoAudit/log/run",
       stdoutBytes: 1_024,
       stderrBytes: 128,
+      artifactIsolation: "run_id",
     },
     ...overrides,
   };
@@ -82,6 +83,7 @@ test("failed 映射为 Pi 可标记失败的去敏异常", () => {
       code: "API_KEY_MISSING",
       message: "raw stderr secret=super-secret ANTHROPIC_API_KEY=abc",
       recoverable: true,
+      suggestion: "Set the required credential.",
     },
   });
 

@@ -14,6 +14,7 @@
 - 联合分析退出码、log 与 `detect_info.json`，避免把执行失败误判为零发现
 - 区分“有发现”“无发现”和“执行失败”三种状态
 - 精简返回给 Agent 的 finding，并过滤原始 stdout、stderr、完整日志和内部运行配置
+- 通过 `promptSnippet` 和 `promptGuidelines` 接入 Pi 的 system prompt 路由，主动告知 Agent 何时应该调用 `repoaudit_scan`
 
 ## 支持范围
 
@@ -29,6 +30,26 @@
 - `MLK`：Memory Leak
 
 该 Tool 面向上述仓库级数据流缺陷，不用于 Web 渗透、网络或端口扫描、二进制逆向、依赖/CVE 扫描、其他漏洞类别或通用代码审查。
+
+## System prompt 集成
+
+`repoaudit_scan` 不只是一个被动等待 Agent 调用的工具——它在 ToolDefinition 上挂了两段 system prompt 元数据，让 Pi 在拼装默认 system prompt 时就把 RepoAudit 的能力注入进去：
+
+| 字段 | 位置 | 作用 |
+| --- | --- | --- |
+| `promptSnippet` | 默认 system prompt 的 *Available tools* 段 | 单行简介，让 Agent 知道这个工具能做什么 |
+| `promptGuidelines` | 默认 system prompt 的 *Guidelines* 段 | 多条决策依据：什么场景下该用、什么场景下不该用、repoPath 语义、如何处理返回的 finding |
+
+两段内容由常量 `REPOAUDIT_PROMPT_SNIPPET` 与 `REPOAUDIT_PROMPT_GUIDELINES` 导出，宿主也可以直接复用它们写自己的 prompt 模板：
+
+```ts
+import {
+  REPOAUDIT_PROMPT_SNIPPET,
+  REPOAUDIT_PROMPT_GUIDELINES,
+} from "@repoaudit/typescript-adapter";
+```
+
+挂上这两个字段之后，Agent 即使收到“帮我看看有没有内存泄漏”这种自然语言指令，也能主动想起用 `repoaudit_scan`，而不需要用户显式提到 RepoAudit。
 
 ## 目录结构
 
@@ -90,14 +111,14 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.1
 
 ```bash
 cd /workspace/target-repository
-pi -e "/app/RepoAudit/pi-extension/src/index.ts"
+pi -e "/app/RepoAudit/pi-extension/dist/src/index.js"
 ```
 
 Windows PowerShell：
 
 ```powershell
 cd "E:\workspace\target-repository"
-pi.cmd -e "E:\path\to\RepoAudit\pi-extension\src\index.ts"
+pi.cmd -e "E:\path\to\RepoAudit\pi-extension\dist\src\index.js"
 ```
 
 加载成功后，Pi Agent 中应出现 `repoaudit_scan` Tool。
@@ -134,24 +155,37 @@ Tool 只接受这三个任务参数：
 
 ## 运行时配置
 
-标准目录结构下，插件会从自身位置向上查找 `src/repoaudit.py`，通常不需要显式设置 RepoAudit 根目录。
+生产环境应显式设置 `REPOAUDIT_ROOT`。本地开发仍可从当前工作目录或插件模块位置向上查找 `src/repoaudit.py`；doctor 会把这种情况标为 `inferred root`。设置 `REPOAUDIT_REQUIRE_EXPLICIT_ROOT=1` 后禁用推导，缺少 `REPOAUDIT_ROOT` 会稳定返回 `RUNTIME_NOT_FOUND`。
 
 | 环境变量 | 默认值 / 说明 |
 | --- | --- |
 | `REPOAUDIT_ROOT` | RepoAudit 根目录；无法自动定位或采用独立部署布局时设置 |
+| `REPOAUDIT_REQUIRE_EXPLICIT_ROOT` | `0`；生产建议设为 `1`，强制显式 root |
 | `REPOAUDIT_PYTHON` | Linux 为 `<RepoAudit>/.venv/bin/python`；Windows 为 `.venv/Scripts/python.exe` |
 | `REPOAUDIT_MODEL` | `claude-3.7` |
 | `REPOAUDIT_TIMEOUT_MS` | `1800000`，即 30 分钟；必须是正整数 |
-| `REPOAUDIT_REQUIRE_API_KEY` | 设为 `1` 时，在启动扫描前严格检查模型凭证 |
+| `REPOAUDIT_REQUIRE_API_KEY` | 默认启用；仅设为 `0` 时跳过扫描前凭证检查，doctor 仍会如实报告缺失 |
+| `REPOAUDIT_MAX_SYMBOLIC_WORKERS` | `4`；允许 `1..32` |
+| `REPOAUDIT_MAX_NEURAL_WORKERS` | `1`；允许 `1..8` |
+| `REPOAUDIT_LOCK_DIR` | `<RepoAudit>/lock` |
+| `REPOAUDIT_LOCK_TIMEOUT_MS` | `300000`，即等待锁 5 分钟 |
+| `REPOAUDIT_LOCK_STALE_MS` | `120000`，即锁心跳超过 2 分钟才进入 stale 判定 |
+| `REPOAUDIT_HEARTBEAT_MS` | `25000`；Tool `onUpdate` 和锁心跳的基础周期 |
 
 Linux 示例：
 
 ```bash
 export REPOAUDIT_ROOT=/app/RepoAudit
+export REPOAUDIT_REQUIRE_EXPLICIT_ROOT=1
 export REPOAUDIT_PYTHON=/app/RepoAudit/.venv/bin/python
 export REPOAUDIT_MODEL=claude-3.7
 export REPOAUDIT_TIMEOUT_MS=1800000
 export REPOAUDIT_REQUIRE_API_KEY=1
+export REPOAUDIT_MAX_SYMBOLIC_WORKERS=4
+export REPOAUDIT_MAX_NEURAL_WORKERS=1
+export REPOAUDIT_LOCK_TIMEOUT_MS=300000
+export REPOAUDIT_LOCK_STALE_MS=120000
+export REPOAUDIT_HEARTBEAT_MS=25000
 export ANTHROPIC_API_KEY=<secret>
 ```
 
@@ -165,6 +199,17 @@ RepoAudit 模型与凭证的对应关系：
 | `gemini` | `GOOGLE_API_KEY` |
 
 Pi Agent 的模型凭证与 RepoAudit 的模型凭证是两类独立配置。两者都应通过云平台 Secret 或受控环境变量注入，不要写入源码或提交到 Git。
+
+### 独立 doctor
+
+doctor 不启动正式扫描、不访问模型，也不会产生 LLM 费用：
+
+```bash
+npm run doctor
+# 安装包后也可执行：repoaudit-doctor
+```
+
+它检查显式/推导 root、`src/repoaudit.py`、Python 3.13、逐个 Python 模块、Tree-sitter 动态库及 C/Cpp/Java/Python/Go grammar、模型凭证映射与凭证是否存在、`log/result/runs/lock` 可写性，以及最终生效的 timeout/worker/lock/heartbeat 数值。输出只包含 API Key 是否存在，不包含值。任一必需检查失败时 CLI 以非零状态退出。
 
 ## 结果语义
 
@@ -187,29 +232,33 @@ RepoAudit 的 Python worker 在部分异常下可能仍返回退出码 `0`。Ada
 RepoAudit 将原始产物写入自身根目录，而不是待审计仓库：
 
 ```text
-<RepoAudit>/log/dfbscan/<model>/<bugType>/<language>/<projectName>/<timestamp>-0/dfbscan.log
-<RepoAudit>/result/dfbscan/<model>/<bugType>/<language>/<projectName>/<timestamp>-0/detect_info.json
+<RepoAudit>/log/dfbscan/<model>/<bugType>/<language>/<projectName>/<run_id>/dfbscan.log
+<RepoAudit>/result/dfbscan/<model>/<bugType>/<language>/<projectName>/<run_id>/detect_info.json
 ```
 
 - 只有产生 accepted finding 时，RepoAudit 才通常会写入 `detect_info.json`。
 - 正常的零发现扫描可能只有 log，没有 JSON；这本身不代表执行失败。
-- log 与 result 的时间戳分别生成，极端情况下可能相差一秒，不能靠目录名手工强制配对。
-- Adapter 使用运行前后目录快照定位本次新增产物，并在候选不唯一时安全失败。
+- 插件生成 `run_<32 hex>` ID，通过新增的可选 `--run-id` 参数传给 legacy Python CLI；未传该参数的原有 CLI 调用仍保留时间戳目录行为。
+- Pi 插件调用使用 run ID 作为 log/result 末级目录，实现本次调用的 artifact 隔离；Adapter 仍保留严格的运行前后快照，并校验新增目录必须与预期 run ID 一致。
+- `<RepoAudit>/log/repoaudit-pi.jsonl` 只记录 run ID、阶段、耗时、退出码、终止来源和相对 artifact 路径，不记录 stderr、密钥、模型请求或源码。
 - Tool 返回产物路径和精简摘要，不把完整源码、prompt、模型响应或原始日志写入 Agent 上下文。
 
 ## 常见失败排查
 
 | 错误码 | 常见原因 | 处理方式 |
 | --- | --- | --- |
-| `REPO_NOT_FOUND`、`NO_ANALYZABLE_FILES` | 目标路径不存在、不是目录或没有所选语言源码 | 检查 `repoPath`、Pi 工作目录和 `language` |
-| `REPOAUDIT_NOT_FOUND` | 无法定位 RepoAudit 根目录或 `src/repoaudit.py` | 检查目录结构或设置 `REPOAUDIT_ROOT` |
+| `REPOSITORY_NOT_FOUND`、`NO_ANALYZABLE_FILES` | 目标路径不存在、不是目录或没有所选语言源码 | 检查 `repoPath`、Pi 工作目录和 `language` |
+| `RUNTIME_NOT_FOUND` | 无法定位 RepoAudit 根目录、入口或运行目录不可用 | 设置 `REPOAUDIT_ROOT` 并运行 doctor |
 | `PYTHON_NOT_FOUND`、`PYTHON_VERSION_UNSUPPORTED` | 虚拟环境缺失或不是 Python 3.13 | 重建 `.venv` 或设置 `REPOAUDIT_PYTHON` |
-| `DEPENDENCY_ERROR` | RepoAudit Python 依赖不完整 | 在指定 Python 环境中重新安装 `requirements.txt` |
+| `DEPENDENCY_MISSING` | RepoAudit Python 依赖不完整 | 按 doctor 列出的模块在指定 Python 环境安装依赖 |
 | `TREE_SITTER_NOT_READY` | `my-languages.so` 缺失或 grammar 无法加载 | 使用同一 Python 环境运行 `lib/build.py` |
 | `API_KEY_MISSING`、`MODEL_CONFIGURATION_ERROR` | 所选模型的凭证缺失或名称无法映射 | 检查 `REPOAUDIT_MODEL` 和对应 Secret |
 | `UNSUPPORTED_*` | 语言、漏洞类型或二者组合不受支持 | 按支持矩阵修改 Tool 参数 |
 | `ANALYSIS_FAILED`、`RESULT_*` | Python worker、日志或结果产物不完整/冲突 | 查看返回的 `logPath`，修复环境后重试 |
-| `ABORTED`、`TIMEOUT` | 用户取消或超过运行时限制 | 调整任务范围或 `REPOAUDIT_TIMEOUT_MS` 后重试 |
+| `SCAN_TIMEOUT` | 插件内部扫描 timeout | 调整任务范围或 `REPOAUDIT_TIMEOUT_MS` 后重试 |
+| `USER_ABORTED` | 用户取消，或取消来源无法可靠识别 | 确认后重新发起扫描 |
+| `HOST_WATCHDOG_ABORTED` | `AbortSignal.reason` 或 runtime option 明确标识宿主 watchdog | 检查宿主 watchdog 与 update 事件链路 |
+| `LOCK_TIMEOUT` | 另一个进程长期持有 RepoAudit 文件锁 | 等待活动扫描结束，或用 doctor/锁元数据排查 stale lock |
 
 ## 配置与安全
 
@@ -220,7 +269,10 @@ RepoAudit 将原始产物写入自身根目录，而不是待审计仓库：
 - RepoAudit 会把被分析的源码片段发送给所选 LLM 供应商。部署前应确认代码分类、供应商协议、数据驻留和组织合规策略允许该行为。
 - 不要把 RepoAudit 根目录、`src/`、`.venv/`、`log/` 或 `result/` 目录自身作为扫描目标。
 - 插件当前没有面向业务目录的通用 allowlist 配置；生产环境应通过容器挂载、文件系统权限或独立运行账户，把可读取范围限制在获准的工作目录。
-- 当前互斥锁只覆盖单个 Node.js 进程。多个 Pi 进程若共享同一个 RepoAudit 根目录，仍可能产生 artifact 冲突；生产部署应限制并发，或为不同进程使用隔离的 RepoAudit runtime。
+- 进程内 Promise 队列只是轻量优化；真正的跨进程保障是 `REPOAUDIT_LOCK_DIR/repoaudit-scan.lock` 的原子 exclusive-create 文件锁。锁包含 owner token、PID、run ID、创建时间和 heartbeat；释放时只删除自己的锁，同主机 PID 仍存活时不会作为 stale 回收。
+- 文件锁适用于具有可靠原子创建语义的共享本地文件系统。多容器并发或不保证原子语义/一致性的网络文件系统必须改用中央队列、数据库 lease 或独立 RepoAudit worker 服务，不能把本文件锁当作分布式锁。
+- 扫描取消保留 Windows `taskkill /T` 后有限 grace 再 `/F`，Unix 使用进程组 `SIGTERM` 后再 `SIGKILL`，避免遗留 Python worker。
+- `repoaudit_scan` 每 25 秒（可配置）通过 `onUpdate` 发送包含 run ID、阶段和已运行秒数的 heartbeat；可识别的 Python JSONL 进度会转为精简更新，非结构化 stdout/stderr 不转发给 Agent。
 - Extension 契约当前锁定在 `@earendil-works/pi-coding-agent@0.84.1`；升级 Pi Agent 后应重新执行加载验证和测试。
 
 ## 开发检查
@@ -233,6 +285,8 @@ npm run typecheck
 npm run lint
 npm test
 npm run verify:extension-load
+npm run doctor
+npm run verify:pack
 ```
 
 当前测试覆盖：
@@ -241,7 +295,9 @@ npm run verify:extension-load
 - 非法语言、缺陷类型与不支持组合
 - Python、依赖、Tree-sitter 和仓库输入预检
 - 含空格及中文路径的独立参数传递
-- 超时、取消、进程树终止和进程内互斥
+- 超时、取消来源、进程树终止、heartbeat 及 finally 清理
+- 文件锁互斥、多进程竞争、stale 恢复和 owner 校验
+- doctor 成功/失败分支、worker 配置和五种 grammar 检查
 - log/result artifact 定位与三态解析
 - Agent 结果精简、失败去敏和上下文泄漏防护
 
@@ -272,8 +328,8 @@ npm run smoke
 - 使用目标机器上的 Python 3.13 重新创建 `.venv`，不要从开发机复制虚拟环境。
 - `lib/build.py` 可能需要下载并编译多种 Tree-sitter grammar，应在构建或发布阶段完成；Tool 调用期间不会自动联网构建。
 - Python 依赖当前以 RepoAudit 的 `requirements.txt` 为准，尚未提供完整锁文件；升级依赖后应重新执行预检和 smoke test。
-- Adapter 当前内部参数为 `temperature=0`、`callDepth=3`、`maxSymbolicWorkers=30`、`maxNeuralWorkers=1`，这些参数不会暴露给 Agent。部署时应按最多 30 个符号分析 worker 预留 CPU 和内存。
-- 一个 RepoAudit runtime 同时只交给一个 Pi 进程执行扫描；需要水平扩展时，为每个进程准备隔离的 runtime 和 artifact 目录。
+- Adapter 当前内部参数为 `temperature=0`、`callDepth=3`，worker 默认分别为 `4` 和 `1`。这些参数不暴露给 Agent Tool schema，只通过受控环境变量配置。
+- 同一个 RepoAudit runtime 的扫描由跨进程文件锁串行化。需要多容器水平扩展时，应使用中央队列/独立 worker 服务，或为每个 worker 准备隔离 runtime。
 
 部署后至少执行以下验收：
 
@@ -283,6 +339,8 @@ npm ci --ignore-scripts
 npm run typecheck
 npm test
 npm run verify:extension-load
+npm run doctor
+npm run verify:pack
 ```
 
 随后从一个无敏感数据的最小仓库启动 Pi，确认 `repoaudit_scan` 可见，并分别验证一次合法参数和一次不支持的语言/缺陷组合。只有在使用获准的测试凭证时，才执行会调用 LLM 的真实扫描。

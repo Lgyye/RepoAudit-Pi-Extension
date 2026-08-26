@@ -3,10 +3,29 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { runRepoAudit } from "./adapter/run-repoaudit.js";
 import {
   createRepoAuditTool,
+  type RepoAuditToolRuntimeOptions,
   type RunRepoAudit,
 } from "./extension/repoaudit-tool.js";
 
 export { runRepoAudit } from "./adapter/run-repoaudit.js";
+export { createRepoAuditRunId } from "./adapter/run-repoaudit.js";
+export {
+  createRuntimeConfig,
+  RUNTIME_DEFAULTS,
+  RUNTIME_ENVIRONMENT_NAMES,
+} from "./adapter/config.js";
+export {
+  runRepoAuditDoctor,
+  type RepoAuditDoctorCheck,
+  type RepoAuditDoctorOptions,
+  type RepoAuditDoctorResult,
+} from "./adapter/doctor.js";
+export {
+  acquireRepoAuditFileLock,
+  type RepoAuditFileLock,
+  type RepoAuditFileLockOptions,
+  type RepoAuditLockMetadata,
+} from "./adapter/file-lock.js";
 export type {
   RepoAuditBugType,
   RepoAuditErrorCode,
@@ -16,6 +35,7 @@ export type {
   RepoAuditResult,
   RepoAuditRunOptions,
   RepoAuditRuntimeOptions,
+  RepoAuditProgress,
   RepoAuditStatus,
 } from "./adapter/contracts.js";
 export {
@@ -26,8 +46,11 @@ export {
 } from "./extension/result-mapper.js";
 export {
   createRepoAuditTool,
+  REPOAUDIT_PROMPT_GUIDELINES,
+  REPOAUDIT_PROMPT_SNIPPET,
   REPOAUDIT_TOOL_DESCRIPTION,
   type RepoAuditToolDefinition,
+  type RepoAuditToolRuntimeOptions,
 } from "./extension/repoaudit-tool.js";
 export {
   repoAuditScanSchema,
@@ -36,9 +59,10 @@ export {
 
 export function createRepoAuditExtension(
   runRepoAuditImplementation: RunRepoAudit = runRepoAudit,
+  toolRuntimeOptions: RepoAuditToolRuntimeOptions = {},
 ): ExtensionFactory {
   return (pi) => {
-    pi.registerTool(createRepoAuditTool(runRepoAuditImplementation));
+    pi.registerTool(createRepoAuditTool(runRepoAuditImplementation, toolRuntimeOptions));
   };
 }
 

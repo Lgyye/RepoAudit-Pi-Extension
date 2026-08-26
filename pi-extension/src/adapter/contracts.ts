@@ -48,34 +48,38 @@ export interface RepoAuditExecutionInfo {
   logDirectory: string | null;
   stdoutBytes: number;
   stderrBytes: number;
+  artifactIsolation: "run_id" | "legacy_snapshot";
 }
 
 export type RepoAuditExecutionMetadata = RepoAuditExecutionInfo;
 
 export type RepoAuditErrorCode =
-  | "REPO_NOT_FOUND"
-  | "NO_ANALYZABLE_FILES"
-  | "REPOAUDIT_NOT_FOUND"
+  | "RUNTIME_NOT_FOUND"
   | "PYTHON_NOT_FOUND"
   | "PYTHON_VERSION_UNSUPPORTED"
-  | "DEPENDENCY_ERROR"
+  | "DEPENDENCY_MISSING"
   | "TREE_SITTER_NOT_READY"
+  | "MODEL_CONFIGURATION_ERROR"
   | "API_KEY_MISSING"
+  | "REPOSITORY_NOT_FOUND"
+  | "NO_ANALYZABLE_FILES"
   | "UNSUPPORTED_LANGUAGE"
   | "UNSUPPORTED_BUG_TYPE"
   | "UNSUPPORTED_LANGUAGE_BUG_COMBINATION"
-  | "MODEL_CONFIGURATION_ERROR"
-  | "ANALYSIS_FAILED"
+  | "SCAN_TIMEOUT"
+  | "USER_ABORTED"
+  | "HOST_WATCHDOG_ABORTED"
+  | "LOCK_TIMEOUT"
   | "RESULT_NOT_FOUND"
   | "RESULT_AMBIGUOUS"
   | "RESULT_PARSE_ERROR"
-  | "ABORTED"
-  | "TIMEOUT";
+  | "ANALYSIS_FAILED";
 
 export interface RepoAuditErrorSummary {
   code: RepoAuditErrorCode;
   message: string;
   recoverable: boolean;
+  suggestion: string;
 }
 
 export interface RepoAuditResult {
@@ -95,4 +99,13 @@ export interface RepoAuditResult {
 export interface RepoAuditRuntimeOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  abortSource?: "user" | "host_watchdog";
+  runId?: string;
+  onProgress?: (progress: RepoAuditProgress) => void;
+}
+
+export interface RepoAuditProgress {
+  runId: string;
+  phase: string;
+  elapsedSeconds: number;
 }

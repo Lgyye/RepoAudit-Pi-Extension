@@ -1,10 +1,12 @@
-import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { appendFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 
 import type {
   RepoAuditBugType,
   RepoAuditExecutionInfo,
   RepoAuditLanguage,
+  RepoAuditProgress,
   RepoAuditResult,
   RepoAuditRunOptions,
   RepoAuditRuntimeOptions,
@@ -16,6 +18,7 @@ import {
   type RepoAuditRuntimeConfig,
 } from "./config.js";
 import { asRepoAuditError, RepoAuditError, toErrorSummary } from "./errors.js";
+import { acquireRepoAuditFileLock } from "./file-lock.js";
 import { preflightRepoAudit } from "./preflight.js";
 import { runProcess, type ProcessRunResult } from "./process-runner.js";
 import {
@@ -27,14 +30,24 @@ import { parseRunArtifacts } from "./result-parser.js";
 
 let executionQueue: Promise<void> = Promise.resolve();
 
+export function createRepoAuditRunId(): string {
+  return `run_${randomUUID().replaceAll("-", "")}`;
+}
+
 function fallbackRuntimeConfig(): RepoAuditRuntimeConfig {
   return {
     repoAuditRoot: "",
+    rootSource: "inferred",
     repoAuditSrcDirectory: "",
     repoAuditEntryPoint: "",
     pythonExecutable: "",
     treeSitterLibrary: "",
+    runsDirectory: "",
+    lockDirectory: "",
     defaultTimeoutMs: 0,
+    lockTimeoutMs: 0,
+    lockStaleMs: 0,
+    heartbeatMs: 25_000,
     modelName: "unknown",
     temperature: 0,
     callDepth: 3,
@@ -46,20 +59,35 @@ function fallbackRuntimeConfig(): RepoAuditRuntimeConfig {
   };
 }
 
+function waitForQueue(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return previous;
+  if (signal.aborted) return Promise.reject(new RepoAuditError("USER_ABORTED", "RepoAudit scan was cancelled."));
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => reject(new RepoAuditError("USER_ABORTED", "RepoAudit scan was cancelled."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    previous.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function withRepoAuditLock<T>(
   action: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
   const previous = executionQueue;
   let release!: () => void;
-  executionQueue = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await previous;
+  executionQueue = new Promise<void>((resolve) => { release = resolve; });
   try {
-    if (signal?.aborted) {
-      throw new RepoAuditError("ABORTED", "RepoAudit 扫描已取消。");
-    }
+    await waitForQueue(previous, signal);
+    if (signal?.aborted) throw new RepoAuditError("USER_ABORTED", "RepoAudit scan was cancelled.");
     return await action();
   } finally {
     release();
@@ -68,9 +96,7 @@ export async function withRepoAuditLock<T>(
 
 function safeRequestedPath(options: RepoAuditRunOptions): string {
   const candidate = (options as { repoPath?: unknown }).repoPath;
-  return typeof candidate === "string" && candidate.trim() !== ""
-    ? path.resolve(candidate)
-    : "";
+  return typeof candidate === "string" && candidate.trim() !== "" ? path.resolve(candidate) : "";
 }
 
 function baseExecution(
@@ -94,6 +120,7 @@ function baseExecution(
     logDirectory: null,
     stdoutBytes: 0,
     stderrBytes: 0,
+    artifactIsolation: "legacy_snapshot",
   };
 }
 
@@ -119,6 +146,7 @@ function executionFromProcess(
     logDirectory: artifacts?.logDirectory ?? null,
     stdoutBytes: processResult.stdoutBytes,
     stderrBytes: processResult.stderrBytes,
+    artifactIsolation: artifacts === undefined ? "legacy_snapshot" : "run_id",
   };
 }
 
@@ -144,69 +172,199 @@ function failedResult(
   };
 }
 
+function emitProgress(
+  runtimeOptions: RepoAuditRuntimeOptions,
+  runId: string,
+  phase: string,
+  startedAt: number,
+): void {
+  const progress: RepoAuditProgress = {
+    runId,
+    phase: phase.slice(0, 80),
+    elapsedSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+  };
+  try {
+    runtimeOptions.onProgress?.(progress);
+  } catch {
+    // Host progress callbacks are observational and must not fail the scan.
+  }
+}
+
+function progressPhaseFromLine(line: string, expectedRunId: string): string | null {
+  if (line.length > 64 * 1024 || !line.trim().startsWith("{")) return null;
+  try {
+    const value = JSON.parse(line) as Record<string, unknown>;
+    const progress = value.repoaudit_progress;
+    if (typeof progress === "object" && progress !== null) {
+      const record = progress as Record<string, unknown>;
+      if (record.run_id === expectedRunId && typeof record.stage === "string") return record.stage;
+    }
+    if (value.run_id === expectedRunId && typeof value.event_type === "string") return value.event_type;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function explicitAbortSource(runtimeOptions: RepoAuditRuntimeOptions): "user" | "host_watchdog" {
+  if (runtimeOptions.abortSource !== undefined) return runtimeOptions.abortSource;
+  const reason = runtimeOptions.signal?.reason as unknown;
+  if (reason === "host_watchdog") return "host_watchdog";
+  if (typeof reason === "object" && reason !== null) {
+    const source = (reason as { source?: unknown; abortSource?: unknown }).source
+      ?? (reason as { abortSource?: unknown }).abortSource;
+    if (source === "host_watchdog") return "host_watchdog";
+  }
+  return "user";
+}
+
+export function abortCodeFromRuntimeOptions(
+  runtimeOptions: RepoAuditRuntimeOptions,
+): "USER_ABORTED" | "HOST_WATCHDOG_ABORTED" {
+  return explicitAbortSource(runtimeOptions) === "host_watchdog"
+    ? "HOST_WATCHDOG_ABORTED"
+    : "USER_ABORTED";
+}
+
+function abortError(runtimeOptions: RepoAuditRuntimeOptions): RepoAuditError {
+  return abortCodeFromRuntimeOptions(runtimeOptions) === "HOST_WATCHDOG_ABORTED"
+    ? new RepoAuditError("HOST_WATCHDOG_ABORTED", "RepoAudit was cancelled by the host watchdog.")
+    : new RepoAuditError("USER_ABORTED", "RepoAudit was cancelled.");
+}
+
+export function processTerminationError(
+  processResult: Pick<ProcessRunResult, "aborted" | "timedOut">,
+  runtimeOptions: RepoAuditRuntimeOptions,
+): RepoAuditError | null {
+  if (processResult.aborted) return abortError(runtimeOptions);
+  if (processResult.timedOut) {
+    return new RepoAuditError("SCAN_TIMEOUT", "RepoAudit scan exceeded its configured timeout.");
+  }
+  return null;
+}
+
+function safeRelativeArtifact(root: string, candidate: string | null): string | null {
+  if (candidate === null) return null;
+  const relative = path.relative(root, candidate);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return relative.replaceAll("\\", "/");
+}
+
+async function appendExecutionLog(
+  config: RepoAuditRuntimeConfig,
+  result: RepoAuditResult,
+  terminationSource: string | null,
+): Promise<void> {
+  if (!config.repoAuditRoot) return;
+  try {
+    const directory = path.join(config.repoAuditRoot, "log");
+    await mkdir(directory, { recursive: true });
+    const record = {
+      runId: result.execution.runId,
+      phase: "completed",
+      status: result.status,
+      durationMs: result.execution.durationMs,
+      exitCode: result.execution.exitCode,
+      terminationSource,
+      timeoutSource: terminationSource === "plugin" || terminationSource === "host_watchdog"
+        ? terminationSource
+        : null,
+      errorCode: result.error?.code ?? null,
+      reportPath: safeRelativeArtifact(config.repoAuditRoot, result.reportPath),
+      logPath: safeRelativeArtifact(config.repoAuditRoot, result.logPath),
+      artifactIsolation: result.execution.artifactIsolation,
+      endedAt: result.execution.endedAt,
+    };
+    await appendFile(path.join(directory, "repoaudit-pi.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // Execution logging is best effort and never changes the scan result.
+  }
+}
+
 async function executeRepoAudit(
   options: RepoAuditRunOptions,
   runtimeOptions: RepoAuditRuntimeOptions,
 ): Promise<RepoAuditResult> {
-  const runId = randomUUID();
-  const startedAt = new Date();
+  const runId = runtimeOptions.runId ?? createRepoAuditRunId();
+  if (!/^run_[0-9a-f]{32}$/.test(runId)) {
+    const config = fallbackRuntimeConfig();
+    return failedResult(options, safeRequestedPath(options), baseExecution(runId, config, new Date()),
+      new RepoAuditError("MODEL_CONFIGURATION_ERROR", "runId is invalid."));
+  }
+  const startedAtDate = new Date();
+  const startedAtMs = startedAtDate.getTime();
   let config: RepoAuditRuntimeConfig;
   try {
     config = createRuntimeConfig();
   } catch (error) {
     const fallbackConfig = fallbackRuntimeConfig();
-    return failedResult(
-      options,
-      safeRequestedPath(options),
-      baseExecution(runId, fallbackConfig, startedAt),
-      asRepoAuditError(error),
-    );
+    return failedResult(options, safeRequestedPath(options), baseExecution(runId, fallbackConfig, startedAtDate), asRepoAuditError(error));
   }
 
   let repoPath = safeRequestedPath(options);
   let pythonVersion = "unknown";
   let processResult: ProcessRunResult | undefined;
   let artifacts: LocatedArtifacts | undefined;
+  let finalResult: RepoAuditResult;
+  let terminationSource: string | null = null;
+  let fileLock: Awaited<ReturnType<typeof acquireRepoAuditFileLock>> | undefined;
   try {
     if (
       runtimeOptions.timeoutMs !== undefined &&
-      (!Number.isSafeInteger(runtimeOptions.timeoutMs) || runtimeOptions.timeoutMs <= 0)
+      (!Number.isSafeInteger(runtimeOptions.timeoutMs) || runtimeOptions.timeoutMs < 1_000)
     ) {
-      throw new RepoAuditError("TIMEOUT", "timeoutMs 必须是正整数。");
+      throw new RepoAuditError("MODEL_CONFIGURATION_ERROR", "timeoutMs must be an integer of at least 1000.");
     }
+    emitProgress(runtimeOptions, runId, "waiting_for_lock", startedAtMs);
+    fileLock = await acquireRepoAuditFileLock({
+      directory: config.lockDirectory,
+      runId,
+      waitTimeoutMs: config.lockTimeoutMs,
+      staleMs: config.lockStaleMs,
+      heartbeatMs: config.heartbeatMs,
+      ...(runtimeOptions.signal === undefined ? {} : { signal: runtimeOptions.signal }),
+    });
+    emitProgress(runtimeOptions, runId, "preflight", startedAtMs);
     const preflight = await preflightRepoAudit(options, config);
     repoPath = preflight.repoPath;
     pythonVersion = preflight.pythonVersion;
     const before = await snapshotArtifacts(options, repoPath, config);
+    emitProgress(runtimeOptions, runId, "python_start", startedAtMs);
     processResult = await runProcess({
       command: config.pythonExecutable,
-      args: buildRepoAuditArgs(options, config, repoPath),
+      args: buildRepoAuditArgs(options, config, repoPath, runId),
       cwd: config.repoAuditSrcDirectory,
       env: buildChildEnvironment(config),
       timeoutMs: runtimeOptions.timeoutMs ?? config.defaultTimeoutMs,
+      terminationGraceMs: 1_000,
+      onStdoutLine(line) {
+        const phase = progressPhaseFromLine(line, runId);
+        if (phase !== null) emitProgress(runtimeOptions, runId, phase, startedAtMs);
+      },
       ...(runtimeOptions.signal === undefined ? {} : { signal: runtimeOptions.signal }),
     });
-    let execution = executionFromProcess(runId, config, pythonVersion, processResult);
-    if (processResult.aborted) {
-      throw new RepoAuditError("ABORTED", "RepoAudit 扫描已取消。");
-    }
+    const terminationError = processTerminationError(processResult, runtimeOptions);
     if (processResult.timedOut) {
-      throw new RepoAuditError("TIMEOUT", "RepoAudit 扫描已超时。");
+      terminationSource = "plugin";
+    } else if (processResult.aborted) {
+      terminationSource = explicitAbortSource(runtimeOptions) === "host_watchdog"
+        ? "host_watchdog"
+        : "user_abort";
     }
+    if (terminationError !== null) throw terminationError;
     if (processResult.spawnError !== null) {
       const code = processResult.spawnError.code === "ENOENT" ? "PYTHON_NOT_FOUND" : "ANALYSIS_FAILED";
-      throw new RepoAuditError(code, "无法启动 RepoAudit Python 进程。", {
-        cause: processResult.spawnError,
-      });
+      throw new RepoAuditError(code, "RepoAudit Python process could not be started.", { cause: processResult.spawnError });
     }
     if (processResult.exitCode !== 0) {
-      throw new RepoAuditError("ANALYSIS_FAILED", "RepoAudit Python 进程以非零状态退出。");
+      throw new RepoAuditError("ANALYSIS_FAILED", "RepoAudit Python process exited unsuccessfully.");
     }
+    emitProgress(runtimeOptions, runId, "artifact_validation", startedAtMs);
     const after = await snapshotArtifacts(options, repoPath, config);
-    artifacts = await locateArtifacts(before, after, config);
-    execution = executionFromProcess(runId, config, pythonVersion, processResult, artifacts);
+    artifacts = await locateArtifacts(before, after, config, runId);
+    const execution = executionFromProcess(runId, config, pythonVersion, processResult, artifacts);
     const parsed = await parseRunArtifacts(artifacts, processResult.stdout, options.bugType);
-    return {
+    finalResult = {
       status: parsed.status,
       tool: "repoaudit",
       bugType: options.bugType,
@@ -219,11 +377,20 @@ async function executeRepoAudit(
       execution,
     };
   } catch (error) {
+    let normalized = asRepoAuditError(error);
+    if (normalized.code === "USER_ABORTED" && runtimeOptions.signal?.aborted) normalized = abortError(runtimeOptions);
+    if (normalized.code === "HOST_WATCHDOG_ABORTED") terminationSource ??= "host_watchdog";
+    if (normalized.code === "USER_ABORTED") terminationSource ??= "user_abort";
     const execution = processResult === undefined
-      ? baseExecution(runId, config, startedAt)
+      ? baseExecution(runId, config, startedAtDate)
       : executionFromProcess(runId, config, pythonVersion, processResult, artifacts);
-    return failedResult(options, repoPath, execution, asRepoAuditError(error), artifacts);
+    finalResult = failedResult(options, repoPath, execution, normalized, artifacts);
+  } finally {
+    await fileLock?.release().catch(() => undefined);
   }
+  emitProgress(runtimeOptions, runId, "completed", startedAtMs);
+  await appendExecutionLog(config, finalResult, terminationSource);
+  return finalResult;
 }
 
 export async function runRepoAudit(
@@ -233,19 +400,17 @@ export async function runRepoAudit(
   return withRepoAuditLock(
     () => executeRepoAudit(options, runtimeOptions),
     runtimeOptions.signal,
-  ).catch((error: unknown) => {
+  ).catch(async (error: unknown) => {
     let config: RepoAuditRuntimeConfig;
-    try {
-      config = createRuntimeConfig();
-    } catch {
-      config = fallbackRuntimeConfig();
-    }
+    try { config = createRuntimeConfig(); } catch { config = fallbackRuntimeConfig(); }
     const startedAt = new Date();
-    return failedResult(
-      options,
-      safeRequestedPath(options),
-      baseExecution(randomUUID(), config, startedAt),
-      asRepoAuditError(error),
-    );
+    const runId = runtimeOptions.runId ?? createRepoAuditRunId();
+    const normalized = runtimeOptions.signal?.aborted ? abortError(runtimeOptions) : asRepoAuditError(error);
+    const result = failedResult(options, safeRequestedPath(options), baseExecution(runId, config, startedAt), normalized);
+    const terminationSource = normalized.code === "HOST_WATCHDOG_ABORTED"
+      ? "host_watchdog"
+      : normalized.code === "USER_ABORTED" ? "user_abort" : null;
+    await appendExecutionLog(config, result, terminationSource);
+    return result;
   });
 }

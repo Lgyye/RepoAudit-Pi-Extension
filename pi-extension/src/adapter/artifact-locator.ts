@@ -88,6 +88,7 @@ export async function locateArtifacts(
   before: ArtifactSnapshot,
   after: ArtifactSnapshot,
   config: RepoAuditRuntimeConfig,
+  expectedRunId?: string,
 ): Promise<LocatedArtifacts> {
   const newLogDirectories = difference(after.logDirectories, before.logDirectories);
   const newResultDirectories = difference(after.resultDirectories, before.resultDirectories);
@@ -102,6 +103,16 @@ export async function locateArtifacts(
       "RESULT_AMBIGUOUS",
       "本次运行产生了多个候选 artifact 目录。",
     );
+  }
+  if (expectedRunId !== undefined) {
+    const expectedLog = path.join(before.logParentDirectory, expectedRunId);
+    const expectedResult = path.join(before.resultParentDirectory, expectedRunId);
+    if (newLogDirectories[0] !== expectedLog || newResultDirectories[0] !== expectedResult) {
+      throw new RepoAuditError(
+        "RESULT_AMBIGUOUS",
+        "Runtime artifacts were not isolated under the expected run ID.",
+      );
+    }
   }
   const logDirectory = newLogDirectories[0] as string;
   const resultDirectory = newResultDirectories[0] ?? null;

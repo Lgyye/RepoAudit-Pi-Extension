@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "@earendil-works/pi-coding-agent";
 import { loadExtensions } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 
-const entryPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+const entryPath = fileURLToPath(new URL("../dist/src/index.js", import.meta.url));
 const parsed = parseArgs(["-e", entryPath]);
 
 assert.deepEqual(parsed.extensions, [entryPath]);

@@ -22,11 +22,17 @@ const options: RepoAuditRunOptions = {
 function config(root: string): RepoAuditRuntimeConfig {
   return {
     repoAuditRoot: root,
+    rootSource: "explicit",
     repoAuditSrcDirectory: path.join(root, "src"),
     repoAuditEntryPoint: path.join(root, "src", "repoaudit.py"),
     pythonExecutable: process.execPath,
     treeSitterLibrary: path.join(root, "lib", "build", "my-languages.so"),
+    runsDirectory: path.join(root, "runs"),
+    lockDirectory: path.join(root, "lock"),
     defaultTimeoutMs: 1_000,
+    lockTimeoutMs: 1_000,
+    lockStaleMs: 60_000,
+    heartbeatMs: 25_000,
     modelName: "claude-3.7",
     temperature: 0,
     callDepth: 3,
@@ -56,10 +62,24 @@ test("唯一的新 log/result artifact 可定位", async (t) => {
   await writeFile(path.join(logDirectory, "dfbscan.log"), "0 bug(s) was/were detected in total.");
   await writeFile(path.join(resultDirectory, "detect_info.json"), "{}");
   const after = await snapshotArtifacts(options, repo, runtime);
-  const located = await locateArtifacts(before, after, runtime);
+  const located = await locateArtifacts(before, after, runtime, "run-1");
   assert.equal(located.logDirectory, logDirectory);
   assert.equal(located.resultDirectory, resultDirectory);
   assert.ok(located.reportPath?.endsWith("detect_info.json"));
+});
+
+test("run ID must match the unique artifact directory", async (t) => {
+  const { root, repo } = await setup(t);
+  const runtime = config(root);
+  const before = await snapshotArtifacts(options, repo, runtime);
+  const parents = artifactParentDirectories(options, repo, runtime);
+  await mkdir(path.join(parents.logParentDirectory, "run-other"), { recursive: true });
+  await mkdir(path.join(parents.resultParentDirectory, "run-other"), { recursive: true });
+  const after = await snapshotArtifacts(options, repo, runtime);
+  await assert.rejects(
+    locateArtifacts(before, after, runtime, "run-expected"),
+    (error: unknown) => error instanceof RepoAuditError && error.code === "RESULT_AMBIGUOUS",
+  );
 });
 
 test("没有新 artifact -> RESULT_NOT_FOUND", async (t) => {

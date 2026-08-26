@@ -50,14 +50,14 @@ export interface RepoAuditPreflightResult {
   apiKeyAvailable: boolean;
 }
 
-interface ProbeResult {
+export interface ProbeResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
   error?: NodeJS.ErrnoException;
 }
 
-function probe(
+export function probe(
   executable: string,
   args: readonly string[],
   cwd: string,
@@ -123,7 +123,7 @@ export function validateRepoAuditOptions(options: RepoAuditRunOptions): void {
     candidate.repoPath.trim() === "" ||
     candidate.repoPath.includes("\0")
   ) {
-    throw new RepoAuditError("REPO_NOT_FOUND", "repoPath 必须是非空目录路径。");
+    throw new RepoAuditError("REPOSITORY_NOT_FOUND", "repoPath must be a non-empty directory path.");
   }
 }
 
@@ -144,7 +144,7 @@ function assertSafeTargetPath(repoPath: string, config: RepoAuditRuntimeConfig):
     protectedRuntimeDirectories.some((runtimePath) => isWithin(repoPath, runtimePath))
   ) {
     throw new RepoAuditError(
-      "REPO_NOT_FOUND",
+      "REPOSITORY_NOT_FOUND",
       "repoPath 不得指向 RepoAudit root 或其运行目录。",
     );
   }
@@ -183,8 +183,8 @@ export async function validateRepositoryInput(
     if (!metadata.isDirectory()) throw new Error("not a directory");
   } catch (error) {
     throw new RepoAuditError(
-      "REPO_NOT_FOUND",
-      "repoPath 不存在或不是目录。",
+      "REPOSITORY_NOT_FOUND",
+      "repoPath does not exist or is not a directory.",
       { cause: error },
     );
   }
@@ -198,21 +198,21 @@ export async function validateRepositoryInput(
   return canonicalPath;
 }
 
-async function assertRuntimePaths(config: RepoAuditRuntimeConfig): Promise<void> {
+export async function assertRuntimePaths(config: RepoAuditRuntimeConfig): Promise<void> {
   try {
     if (!(await stat(config.repoAuditRoot)).isDirectory()) throw new Error("not a directory");
     if (!(await stat(config.repoAuditSrcDirectory)).isDirectory()) throw new Error("src missing");
     if (!(await stat(config.repoAuditEntryPoint)).isFile()) throw new Error("entry missing");
   } catch (error) {
     throw new RepoAuditError(
-      "REPOAUDIT_NOT_FOUND",
-      "RepoAudit root 或 src/repoaudit.py 不存在。",
+      "RUNTIME_NOT_FOUND",
+      "RepoAudit root or src/repoaudit.py is unavailable.",
       { cause: error, recoverable: false },
     );
   }
 }
 
-async function getPythonVersion(config: RepoAuditRuntimeConfig): Promise<string> {
+export async function getPythonVersion(config: RepoAuditRuntimeConfig): Promise<string> {
   try {
     if (!(await stat(config.pythonExecutable)).isFile()) throw new Error("not a file");
     await access(config.pythonExecutable, fsConstants.X_OK);
@@ -252,17 +252,20 @@ async function getPythonVersion(config: RepoAuditRuntimeConfig): Promise<string>
   return `${match[1]}.${match[2]}.${match[3]}`;
 }
 
-async function assertDependencies(config: RepoAuditRuntimeConfig): Promise<void> {
+export const REQUIRED_PYTHON_MODULES = [
+  "tree_sitter", "tqdm", "networkx", "openai", "anthropic",
+  "google.generativeai", "tiktoken", "boto3", "botocore",
+] as const;
+
+export async function missingPythonDependencies(
+  config: RepoAuditRuntimeConfig,
+): Promise<string[]> {
   const script = [
-    "import tree_sitter",
-    "import tqdm",
-    "import networkx",
-    "import openai",
-    "import anthropic",
-    "import google.generativeai",
-    "import tiktoken",
-    "import boto3",
-    "import botocore",
+    "import importlib.util,json,sys",
+    `names=${JSON.stringify(REQUIRED_PYTHON_MODULES)}`,
+    "missing=[]",
+    "for_name='''\\nfor name in names:\\n try:\\n  found=importlib.util.find_spec(name) is not None\\n except (ImportError,ModuleNotFoundError):\\n  found=False\\n if not found: missing.append(name)''';exec(for_name)",
+    "print(json.dumps(missing))",
   ].join("; ");
   const result = await probe(
     config.pythonExecutable,
@@ -271,15 +274,44 @@ async function assertDependencies(config: RepoAuditRuntimeConfig): Promise<void>
   );
   if (result.error || result.exitCode !== 0) {
     throw new RepoAuditError(
-      "DEPENDENCY_ERROR",
-      "RepoAudit Python runtime 缺少必要依赖。",
+      "DEPENDENCY_MISSING",
+      "RepoAudit Python dependency probe failed.",
       { cause: result.error },
+    );
+  }
+  try {
+    const parsed = JSON.parse(result.stdout.trim()) as unknown;
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+      throw new Error("invalid dependency probe output");
+    }
+    return parsed;
+  } catch (error) {
+    throw new RepoAuditError("DEPENDENCY_MISSING", "Python dependency probe returned invalid output.", {
+      cause: error,
+    });
+  }
+}
+
+export async function assertDependencies(config: RepoAuditRuntimeConfig): Promise<void> {
+  const missing = await missingPythonDependencies(config);
+  if (missing.length > 0) {
+    throw new RepoAuditError(
+      "DEPENDENCY_MISSING",
+      `RepoAudit Python runtime is missing modules: ${missing.join(", ")}.`,
     );
   }
 }
 
-async function assertTreeSitter(
-  language: RepoAuditLanguage,
+export const TREE_SITTER_GRAMMARS = {
+  C: "c",
+  Cpp: "cpp",
+  Java: "java",
+  Python: "python",
+  Go: "go",
+} as const;
+
+export async function assertTreeSitter(
+  language: keyof typeof TREE_SITTER_GRAMMARS,
   config: RepoAuditRuntimeConfig,
 ): Promise<void> {
   try {
@@ -291,7 +323,7 @@ async function assertTreeSitter(
       { cause: error },
     );
   }
-  const grammar = { Cpp: "cpp", Java: "java", Python: "python", Go: "go" }[language];
+  const grammar = TREE_SITTER_GRAMMARS[language];
   const result = await probe(
     config.pythonExecutable,
     [

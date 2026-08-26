@@ -18,6 +18,8 @@ log/
 **.log
 result**
 runs/
+lock/
+*.tgz
 
 # Distribution / packaging
 .Python

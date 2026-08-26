@@ -1,5 +1,6 @@
 import argparse
 import glob
+import json
 import math
 import os
 import sys
@@ -87,6 +88,10 @@ class RepoAudit:
         self.call_depth = args.call_depth
         self.max_symbolic_workers = args.max_symbolic_workers
         self.max_neural_workers = args.max_neural_workers
+        supplied_run_id = getattr(args, "run_id", None)
+        self.run_id = (
+            None if supplied_run_id is None else validate_run_id(supplied_run_id)
+        )
 
         self.bug_type = args.bug_type
         self.is_reachable = args.is_reachable
@@ -132,6 +137,7 @@ class RepoAudit:
         """
         Start the batch scan process.
         """
+        self._emit_progress("scan_started")
         if self.args.scan_type == "metascan":
             assert self.ts_analyzer is not None
             metascan_pipeline = MetaScanAgent(
@@ -153,6 +159,7 @@ class RepoAudit:
                     call_depth=self.call_depth,
                     max_symbolic_workers=self.max_symbolic_workers,
                     max_neural_workers=self.max_neural_workers,
+                    run_id=self.run_id,
                 )
                 return
             assert self.ts_analyzer is not None
@@ -166,9 +173,28 @@ class RepoAudit:
                 self.temperature,
                 self.call_depth,
                 self.max_neural_workers,
+                run_id=self.run_id,
             )
             dfbscan_agent.start_scan()
+        self._emit_progress("scan_completed")
         return
+
+    def _emit_progress(self, stage: str) -> None:
+        if self.run_id is None:
+            return
+        print(
+            json.dumps(
+                {
+                    "repoaudit_progress": {
+                        "run_id": self.run_id,
+                        "stage": stage,
+                    }
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
 
     def traverse_files(self, project_path: str, suffixs: List) -> None:
         """
@@ -336,7 +362,7 @@ def _configure_legacy_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument(
         "--max-symbolic-workers",
         type=int,
-        default=30,
+        default=4,
         help="Max symbolic workers for parsing-based analysis",
     )
 
@@ -361,6 +387,10 @@ def _configure_legacy_args(argv: Optional[Sequence[str]] = None):
         choices=["legacy", "staged"],
         default="legacy",
         help="DFB engine implementation; legacy preserves the original behavior",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Optional run_<uuid> identifier used for isolated runtime artifacts.",
     )
     return parser.parse_args(argv)
 
@@ -399,8 +429,8 @@ def _add_symbolic_workers(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-symbolic-workers",
         type=int,
-        default=30,
-        help="Workers used to rebuild syntactic context (default: 30).",
+        default=4,
+        help="Workers used to rebuild syntactic context (default: 4).",
     )
 
 
@@ -479,6 +509,9 @@ def _configure_staged_args(argv: Sequence[str]):
     )
     full_scan_parser.add_argument(
         "--project-path", required=True, help="Repository path."
+    )
+    full_scan_parser.add_argument(
+        "--run-id", help="Optional run_<uuid> identifier supplied by an orchestrator."
     )
     full_scan_parser.add_argument(
         "--language",
@@ -907,6 +940,7 @@ def _run_full_scan_command(args: argparse.Namespace) -> int:
         call_depth=args.call_depth,
         max_symbolic_workers=args.max_symbolic_workers,
         max_neural_workers=args.max_neural_workers,
+        run_id=args.run_id,
     )
     return 0 if run.status == "completed" else 1
 
